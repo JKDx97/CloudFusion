@@ -1,0 +1,22 @@
+# Dependencies and build output
+node_modules/
+**/node_modules.incomplete/
+dist/
+coverage/
+.angular/
+apps/web/.angular/
+
+# Environment files and secrets
+.env
+.env.*
+!.env.example
+
+# Local tooling
+.vscode/
+*.log
+*.tsbuildinfo
+apps/api/uploads/
+
+# OS files
+.DS_Store
+Thumbs.db

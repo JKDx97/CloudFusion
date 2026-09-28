@@ -1,0 +1,10 @@
+export enum CloudProvider {
+  GOOGLE_DRIVE = 'GOOGLE_DRIVE',
+  ONEDRIVE = 'ONEDRIVE',
+}
+
+export enum CloudAccountStatus {
+  CONNECTED = 'CONNECTED',
+  REAUTH_REQUIRED = 'REAUTH_REQUIRED',
+  DISCONNECTED = 'DISCONNECTED',
+}

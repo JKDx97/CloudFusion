@@ -1,0 +1,59 @@
+<main class="min-h-screen bg-[#f7f8fc] lg:grid lg:grid-cols-[minmax(360px,0.9fr)_1.1fr]">
+  <section class="cf-gradient hidden min-h-screen flex-col justify-between p-12 text-white lg:flex">
+    <div class="flex items-center gap-3">
+      <div class="flex h-10 w-10 items-center justify-center rounded-xl bg-white/15 text-lg font-bold">C</div>
+      <span class="text-lg font-semibold tracking-tight">CloudFusion</span>
+    </div>
+    <div class="max-w-md">
+      <p class="mb-5 text-sm font-semibold uppercase tracking-[0.28em] text-indigo-200">Tu espacio, conectado</p>
+      <h1 class="text-5xl font-semibold leading-[1.08] tracking-tight">Todos tus archivos. Una sola visión.</h1>
+      <p class="mt-6 text-base leading-7 text-indigo-100">Una base segura para organizar tu almacenamiento digital con claridad.</p>
+    </div>
+    <p class="text-sm text-indigo-200">© 2026 CloudFusion</p>
+  </section>
+
+  <section class="flex min-h-screen items-center justify-center px-6 py-12 sm:px-10">
+    <div class="w-full max-w-md">
+      <div class="mb-10 lg:hidden">
+        <div class="flex items-center gap-3">
+          <div class="cf-gradient flex h-10 w-10 items-center justify-center rounded-xl text-lg font-bold text-white">C</div>
+          <span class="text-lg font-semibold tracking-tight text-slate-900">CloudFusion</span>
+        </div>
+      </div>
+      <div class="mb-8">
+        <p class="mb-3 text-sm font-semibold uppercase tracking-[0.22em] text-indigo-600">Bienvenido</p>
+        <h2 class="text-3xl font-semibold tracking-tight text-slate-950">Inicia sesión</h2>
+        <p class="mt-2 text-slate-500">Continúa donde lo dejaste.</p>
+      </div>
+
+      @if (errorMessage) {
+        <div class="mb-5 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700" role="alert">{{ errorMessage }}</div>
+      }
+
+      <form class="space-y-5" [formGroup]="form" (ngSubmit)="submit()">
+        <label class="block">
+          <span class="mb-2 block text-sm font-medium text-slate-700">Correo</span>
+          <input class="w-full rounded-xl border border-slate-200 bg-white px-4 py-3.5 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100" type="email" formControlName="email" placeholder="tu@correo.com" autocomplete="email" />
+          @if (form.controls.email.touched && form.controls.email.invalid) {
+            <span class="mt-1.5 block text-xs text-red-600">Introduce un correo válido.</span>
+          }
+        </label>
+        <label class="block">
+          <span class="mb-2 block text-sm font-medium text-slate-700">Contraseña</span>
+          <input class="w-full rounded-xl border border-slate-200 bg-white px-4 py-3.5 text-slate-900 outline-none transition placeholder:text-slate-400 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-100" type="password" formControlName="password" placeholder="Tu contraseña" autocomplete="current-password" />
+          @if (form.controls.password.touched && form.controls.password.invalid) {
+            <span class="mt-1.5 block text-xs text-red-600">La contraseña es obligatoria.</span>
+          }
+        </label>
+        <button class="w-full rounded-xl bg-indigo-600 px-4 py-3.5 font-semibold text-white shadow-lg shadow-indigo-200 transition hover:bg-indigo-700 disabled:cursor-not-allowed disabled:opacity-60" type="submit" [disabled]="submitting">
+          {{ submitting ? 'Iniciando sesión...' : 'Iniciar sesión' }}
+        </button>
+      </form>
+
+      <p class="mt-8 text-center text-sm text-slate-500">
+        ¿No tienes cuenta?
+        <a class="font-semibold text-indigo-600 transition hover:text-indigo-800" routerLink="/register">Crear cuenta</a>
+      </p>
+    </div>
+  </section>
+</main>
