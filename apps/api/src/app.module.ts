@@ -13,6 +13,8 @@ import { CloudFilesModule } from './cloud-files/cloud-files.module';
 import { TransferJob } from './transfers/entities/transfer-job.entity';
 import { TransfersModule } from './transfers/transfers.module';
 import { CloudSearchModule } from './cloud-search/cloud-search.module';
+import { StorageRulesModule } from './storage-rules/storage-rules.module';
+import { StorageRule } from './storage-rules/entities/storage-rule.entity';
 
 @Module({
   imports: [
@@ -32,7 +34,7 @@ import { CloudSearchModule } from './cloud-search/cloud-search.module';
         password: config.get<string>('database.password'),
         database: config.get<string>('database.name'),
         autoLoadEntities: true,
-        entities: [User, CloudAccount, TransferJob],
+        entities: [User, CloudAccount, TransferJob, StorageRule],
         migrations: [__dirname + '/database/migrations/*{.ts,.js}'],
         synchronize: false,
         migrationsRun: false,
@@ -45,6 +47,7 @@ import { CloudSearchModule } from './cloud-search/cloud-search.module';
     CloudFilesModule,
     TransfersModule,
     CloudSearchModule,
+    StorageRulesModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })

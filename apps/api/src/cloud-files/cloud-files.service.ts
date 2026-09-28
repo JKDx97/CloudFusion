@@ -7,12 +7,14 @@ import { CloudFile, CloudDownload } from '../providers/common/cloud-file.interfa
 import { ProviderErrorCode, providerHttpError, ProviderException } from '../providers/common/provider-error';
 import { ProviderUploadInput } from '../providers/common/cloud-provider.interface';
 import { CreateFolderDto } from './dto/create-folder.dto';
+import { StorageRuleEngine } from '../storage-rules/storage-rule-engine.service';
 
 @Injectable()
 export class CloudFilesService {
   constructor(
     private readonly accounts: CloudAccountService,
     private readonly resolver: CloudProviderResolver,
+    private readonly storageRuleEngine: StorageRuleEngine,
   ) {}
 
   async list(userId: string, accountId?: string, parentId?: string): Promise<CloudFile[]> {
@@ -54,6 +56,46 @@ export class CloudFilesService {
     };
     try {
       return await context.adapter.uploadFile(context.accessToken, accountId, input);
+    } catch (error) {
+      throw providerHttpError(error, ProviderErrorCode.UPLOAD_FAILED);
+    } finally {
+      await unlink(file.path).catch(() => undefined);
+    }
+  }
+
+  async smartUpload(userId: string, file: Express.Multer.File, parentId?: string): Promise<{
+    file: CloudFile;
+    destination: { accountId: string; provider: string; folderId: string | null; ruleId: string | null };
+  }> {
+    if (!file) throw new BadRequestException('A file is required');
+    const destination = await this.storageRuleEngine.select(userId, {
+      name: file.originalname,
+      mimeType: file.mimetype,
+      size: file.size,
+    });
+    const context = await this.accounts.getAuthorizedAccount(userId, destination.account.id);
+    const folderId = parentId ?? destination.folderId ?? undefined;
+    if (folderId) {
+      const folder = await context.adapter.getFile(context.accessToken, destination.account.id, folderId);
+      if (folder.type !== 'folder') throw new BadRequestException('Destination is not a folder');
+    }
+    try {
+      const uploaded = await context.adapter.uploadFile(context.accessToken, destination.account.id, {
+        stream: createReadStream(file.path),
+        name: file.originalname,
+        mimeType: file.mimetype,
+        size: file.size,
+        parentId: folderId,
+      });
+      return {
+        file: uploaded,
+        destination: {
+          accountId: destination.account.id,
+          provider: destination.account.provider,
+          folderId: folderId ?? null,
+          ruleId: destination.ruleId,
+        },
+      };
     } catch (error) {
       throw providerHttpError(error, ProviderErrorCode.UPLOAD_FAILED);
     } finally {

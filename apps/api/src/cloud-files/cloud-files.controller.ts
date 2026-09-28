@@ -77,6 +77,15 @@ export class CloudFilesController {
     return this.service.upload(request.user.sub, accountId, file, parentId);
   }
 
+  @Post('smart-upload')
+  @ApiOperation({ summary: 'Upload using the user smart storage rules and available quota' })
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({ schema: { type: 'object', required: ['file'], properties: { file: { type: 'string', format: 'binary' }, parentId: { type: 'string' } } } })
+  @UseInterceptors(FileInterceptor('file', { storage: diskStorage({ destination: uploadDirectory, filename: (_request, file, callback) => callback(null, `${Date.now()}-${randomBytes(8).toString('hex')}-${file.originalname}`) }), limits: { fileSize: Number(process.env.CLOUD_UPLOAD_MAX_BYTES ?? 52_428_800) } }))
+  smartUpload(@Req() request: AuthenticatedRequest, @UploadedFile() file: Express.Multer.File, @Body('parentId') parentId?: string) {
+    return this.service.smartUpload(request.user.sub, file, parentId);
+  }
+
   @Post(':accountId/folders')
   @ApiOperation({ summary: 'Create a remote folder' })
   createFolder(@Req() request: AuthenticatedRequest, @Param('accountId') accountId: string, @Body() dto: CreateFolderDto) {
