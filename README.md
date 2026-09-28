@@ -305,6 +305,104 @@ Las pruebas cubren raíz por usuario, ownership, carpetas, nombres duplicados, m
 - La reanudación de sesiones resumibles queda preparada a nivel de adaptadores, pero no se implementa una sesión distribuida completa.
 - Google Workspace Docs/Sheets/Slides requieren exportación específica si se desea descargar su contenido nativo.
 
+## Fase 5 — Data Protection
+
+La capa de protección se apoya en el Drive virtual y mantiene la replicación separada del backup:
+
+```text
+VirtualNode → FileVersion → StorageObject cifrado
+                           ├── réplicas para disponibilidad
+                           ├── referencias deduplicadas por usuario
+                           └── copias de backup verificadas en otra cuenta
+
+FileVersion → Snapshot → Backup → Recovery
+```
+
+### Cifrado y deduplicación
+
+- Cada contenido usa una DEK aleatoria de 256 bits y AES-256-GCM. La DEK se protege con una KEK versionada (envelope encryption); PostgreSQL conserva el DEK envuelto y la metadata de integridad, nunca la DEK en claro.
+- `CLOUDFUSION_MASTER_KEY` acepta 32 bytes en Base64 o 64 caracteres hexadecimales. Para rotación, configura `CLOUDFUSION_MASTER_KEYS_JSON` con las versiones antigua y nueva, cambia `CLOUDFUSION_KEY_VERSION` y avanza `POST /virtual-drive/security/rotate-keys` con cursor/límite hasta terminar. El endpoint solo reenvuelve DEKs; no vuelve a cifrar cada objeto.
+- La deduplicación se limita a archivos del mismo usuario usando SHA-256 del contenido lógico y tamaño. Los objetos cifrados no usan cifrado convergente: dos contenidos iguales pueden tener distinta ciphertext/DEK, aunque compartan el mismo `StorageObject` cuando se deduplican dentro de la cuenta.
+- Descarga y verificación operan en streaming. No se registran claves, tokens ni contenido.
+
+### Versiones y snapshots
+
+- Cada carga de un archivo existente agrega un `FileVersion`; restaurar una versión crea una versión actual nueva y conserva las anteriores.
+- La retención `KEEP_LAST_N` conserva hasta N versiones recientes, incluida la actual. Versiones referenciadas por snapshots o backups no se recolectan.
+- Los snapshots guardan el árbol lógico y referencias a versiones, sin copiar el contenido. Los snapshots marcados protegidos no se eliminan desde la API.
+- Con `SNAPSHOT_SCHEDULER_ENABLED=true`, se genera un snapshot diario protegido a las 03:00 UTC para cada Drive inicializado. Los snapshots también se pueden crear y explorar en `/protection`.
+- Restaurar un snapshot completo crea un job BullMQ con progreso; restaurar un elemento conserva los elementos existentes usando nombres alternativos por defecto.
+
+### Backups y recuperación
+
+- Las políticas admiten ejecución diaria, semanal o mensual, retención en días y destino en una cuenta cloud conectada. El destino debe ser distinto de la réplica fuente que se está copiando.
+- Un backup es distinto de una réplica: captura un snapshot y copia ciphertext al directorio administrado `CloudFusion/Backups` del destino. Solo queda `COMPLETED` después de volver a descargar cada copia y verificar su tamaño y SHA-256 cifrado en streaming.
+- Los backups verificados pueden recuperarse desde el centro `/protection`; si falta una réplica accesible, se crea y verifica un blob nuevo en `CloudFusion/objects` desde la copia de backup antes de encolar la restauración. Así, la retención del backup no borra la réplica operativa recuperada.
+- La desconexión de una cuenta muestra su impacto en réplicas únicas, versiones, referencias en snapshots y backups; la API exige confirmación explícita si hay contenido afectado.
+
+### Detección y limpieza segura
+
+- El detector agrega eventos auditados de carga/modificación, renombrado y eliminación dentro de una ventana. Al superar el umbral registra `MASS_CHANGE_DETECTED`, muestra una alerta y, si está habilitado, crea un snapshot de emergencia protegido. No bloquea la cuenta automáticamente y no constituye una garantía total contra ransomware.
+- La recolección de objetos usa `GC_PENDING` y período de gracia antes de `DELETING`. Antes del sweep revalida versiones, referencias de snapshots y copias de backup bajo lock; el worker de réplicas elimina los blobs físicos. Un fallo de cola vuelve a intentarse en otro ciclo.
+- El dashboard informa conteos y ahorro de deduplicación calculados desde los datos existentes; no publica claves ni inventa estimaciones.
+
+### Endpoints principales de Fase 5
+
+| Método | Ruta | Descripción |
+| --- | --- | --- |
+| GET/POST | `/virtual-drive/nodes/:id/versions` | Historial y nueva versión |
+| GET/POST | `/virtual-drive/nodes/:id/versions/:versionId/download` / `restore` | Descargar/restaurar una versión |
+| GET/POST/DELETE | `/snapshots` y `/snapshots/:id` | Explorar, crear y eliminar snapshots no protegidos |
+| POST | `/snapshots/:id/restore` | Encolar restauración completa |
+| GET/POST/PATCH/DELETE | `/backup-policies` | Administrar programación, frecuencia, destino y retención |
+| POST | `/backup-policies/:id/run` | Ejecutar backup ahora |
+| GET | `/backups` y `/backups/:id` | Historial, estado y verificación |
+| POST | `/backups/:id/restore` | Recuperar un backup verificado |
+| GET | `/protection/overview` y `/protection/alerts` | Métricas y alertas propias |
+| PATCH | `/protection/alerts/:id/resolve` | Marcar alerta revisada |
+| GET | `/cloud-accounts/:id/impact` | Impacto antes de desconectar una cuenta |
+
+### Variables de entorno de Fase 5
+
+`CLOUDFUSION_MASTER_KEY` y el keyring son secretos de despliegue; no se deben subir al repositorio ni guardar junto a los blobs cloud. Respalda la clave maestra de forma offline en un gestor de secretos con control de acceso: perder la clave y no tener recuperación puede volver irrecuperables los datos cifrados.
+
+```env
+CLOUDFUSION_MASTER_KEY=
+CLOUDFUSION_KEY_VERSION=1
+CLOUDFUSION_MASTER_KEYS_JSON=
+DEFAULT_VERSION_RETENTION_MODE=KEEP_LAST_N
+DEFAULT_VERSION_RETENTION_COUNT=10
+SNAPSHOT_SCHEDULER_ENABLED=true
+EMERGENCY_SNAPSHOT_ENABLED=true
+MASS_CHANGE_WINDOW_SECONDS=120
+MASS_CHANGE_THRESHOLD=250
+MASS_CHANGE_SCAN_INTERVAL_SECONDS=30
+STORAGE_GC_ENABLED=true
+STORAGE_GC_GRACE_HOURS=24
+STORAGE_GC_INTERVAL_MINUTES=60
+SNAPSHOT_RESTORE_QUEUE_NAME=cloudfusion-snapshot-restores
+SNAPSHOT_RESTORE_WORKER_ENABLED=true
+SNAPSHOT_RESTORE_WORKER_CONCURRENCY=1
+SNAPSHOT_RESTORE_MAX_RETRIES=3
+BACKUP_QUEUE_NAME=cloudfusion-backups
+BACKUP_WORKER_ENABLED=true
+BACKUP_WORKER_CONCURRENCY=2
+BACKUP_MAX_RETRIES=3
+BACKUP_SCHEDULE_INTERVAL_SECONDS=30
+```
+
+Aplica las migraciones antes de iniciar API y frontend:
+
+```powershell
+npm --prefix apps/api run migration:run
+npm --prefix apps/api test -- --runInBand
+npm --prefix apps/api run build
+npm --prefix apps/web test -- --watch=false
+npm --prefix apps/web run build
+```
+
+PostgreSQL y Redis deben estar disponibles. Backups y restauraciones se procesan por BullMQ; la interfaz consulta estados periódicamente. La conexión real con Google Drive/OneDrive, OAuth, cuotas y restauración entre proveedores requiere credenciales válidas y cuentas conectadas.
+
 ## Fuera del alcance actual
 
-CloudFusion todavía no implementa Dropbox, Box, MEGA, pCloud, P2P, BitTorrent, erasure coding/RAID, deduplicación, cifrado end-to-end, montaje local, WebDAV, gateway S3, CDN, Kubernetes ni aplicación móvil.
+CloudFusion todavía no implementa Dropbox, Box, MEGA, pCloud, P2P, BitTorrent, erasure coding/RAID, cifrado end-to-end de conocimiento cero, montaje local, WebDAV, gateway S3, CDN, Kubernetes ni aplicación móvil.
