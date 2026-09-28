@@ -1,15 +1,15 @@
 import { AsyncPipe, DatePipe } from '@angular/common';
 import { Component, DestroyRef, inject, signal } from '@angular/core';
-import { ActivatedRoute, Router } from '@angular/router';
+import { ActivatedRoute, Router, RouterLink } from '@angular/router';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { AuthService } from '../../core/auth/auth.service';
 import { CloudService } from '../../core/cloud/cloud.service';
-import { CloudAccount, CloudFile, CloudProvider, CloudStorageSummary } from '../../shared/models/cloud.model';
+import { CloudAccount, CloudFile, CloudProvider, CloudStorageSummary, TransferOperation } from '../../shared/models/cloud.model';
 
 @Component({
   selector: 'app-dashboard',
   standalone: true,
-  imports: [AsyncPipe, DatePipe],
+  imports: [AsyncPipe, DatePipe, RouterLink],
   templateUrl: './dashboard.component.html',
 })
 export class DashboardComponent {
@@ -30,6 +30,11 @@ export class DashboardComponent {
   readonly error = signal<string | null>(null);
   readonly notice = signal<string | null>(null);
   readonly creatingFolder = signal(false);
+  readonly transferFile = signal<CloudFile | null>(null);
+  readonly transferOperation = signal<TransferOperation>('COPY');
+  readonly transferDestinationAccountId = signal<string>('');
+  readonly transferDestinationFolderId = signal<string | undefined>(undefined);
+  readonly transferDestinationFolders = signal<CloudFile[]>([]);
 
   constructor() {
     this.route.queryParamMap.pipe(takeUntilDestroyed(this.destroyRef)).subscribe((params) => {
@@ -85,6 +90,17 @@ export class DashboardComponent {
 
   connect(provider: CloudProvider): void { this.cloudService.connect(provider); }
 
+  smartUpload(event: Event): void {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    this.loading.set(true);
+    this.cloudService.smartUpload(file, this.parentId()).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: (result) => { input.value = ''; this.notice.set(`Archivo subido a ${this.providerLabel(result.destination.provider as CloudProvider)}.`); this.loadFiles(); },
+      error: () => { this.error.set('No se pudo seleccionar un destino con espacio suficiente.'); this.loading.set(false); },
+    });
+  }
+
   async createFolder(): Promise<void> {
     const accountId = this.selectedAccountId() ?? this.files()[0]?.accountId;
     if (!accountId) { this.notice.set('Selecciona una cuenta antes de crear una carpeta.'); return; }
@@ -133,6 +149,40 @@ export class DashboardComponent {
 
   refreshAccount(account: CloudAccount): void {
     this.cloudService.refreshAccount(account.id).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({ next: () => { this.notice.set('Cuota actualizada.'); this.reload(); }, error: () => this.error.set('La cuenta necesita reconectarse.') });
+  }
+
+  openTransfer(file: CloudFile, operation: TransferOperation): void {
+    const destination = this.accounts().find((account) => account.status === 'CONNECTED' && account.id !== file.accountId);
+    if (!destination) { this.notice.set('Conecta otra cuenta para transferir este archivo.'); return; }
+    this.transferFile.set(file);
+    this.transferOperation.set(operation);
+    this.transferDestinationAccountId.set(destination.id);
+    this.transferDestinationFolderId.set(undefined);
+    this.loadDestinationFolders();
+  }
+
+  closeTransfer(): void { this.transferFile.set(null); this.transferDestinationFolders.set([]); }
+
+  setDestinationAccount(event: Event): void {
+    this.transferDestinationAccountId.set((event.target as HTMLSelectElement).value);
+    this.transferDestinationFolderId.set(undefined);
+    this.loadDestinationFolders();
+  }
+
+  loadDestinationFolders(): void {
+    const accountId = this.transferDestinationAccountId();
+    if (!accountId) { this.transferDestinationFolders.set([]); return; }
+    this.cloudService.listFiles(accountId).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({ next: (files) => this.transferDestinationFolders.set(files.filter((file) => file.type === 'folder')), error: () => this.transferDestinationFolders.set([]) });
+  }
+
+  createTransfer(): void {
+    const file = this.transferFile();
+    const destinationAccountId = this.transferDestinationAccountId();
+    if (!file || !destinationAccountId) return;
+    this.cloudService.createTransfer({ sourceAccountId: file.accountId, sourceFileId: file.id, destinationAccountId, destinationFolderId: this.transferDestinationFolderId(), operation: this.transferOperation(), conflictStrategy: 'RENAME' }).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: () => { this.closeTransfer(); this.notice.set('Transferencia creada.'); void this.router.navigate(['/transfers']); },
+      error: () => this.error.set('No se pudo crear la transferencia.'),
+    });
   }
 
   providerLabel(provider: CloudProvider): string { return provider === 'GOOGLE_DRIVE' ? 'Google Drive' : 'OneDrive'; }

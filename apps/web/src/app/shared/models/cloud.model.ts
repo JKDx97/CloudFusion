@@ -38,3 +38,64 @@ export interface CloudFile {
   webUrl?: string;
   thumbnailUrl?: string;
 }
+
+export type TransferOperation = 'COPY' | 'MOVE';
+export type TransferStatus = 'QUEUED' | 'PREPARING' | 'TRANSFERRING' | 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'RETRYING';
+export type ConflictStrategy = 'RENAME' | 'OVERWRITE' | 'SKIP';
+
+export interface TransferJob {
+  id: string;
+  sourceAccountId: string;
+  sourceProvider: CloudProvider;
+  sourceFileId: string;
+  destinationAccountId: string;
+  destinationProvider: CloudProvider;
+  destinationFolderId: string | null;
+  operation: TransferOperation;
+  conflictStrategy: ConflictStrategy;
+  parentJobId: string | null;
+  relativePath: string | null;
+  fileName: string;
+  fileSize: number | null;
+  status: TransferStatus;
+  progress: number;
+  bytesTransferred: number;
+  attemptCount: number;
+  errorCode: string | null;
+  errorMessage: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  updatedAt: string;
+}
+
+export interface TransferProgressEvent {
+  transferId: string;
+  status: TransferStatus;
+  progress: number;
+  bytesTransferred: number;
+  fileSize: number | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+}
+
+export type StorageRuleConditionType = 'EXTENSION' | 'MIME' | 'SIZE_GREATER_THAN' | 'DEFAULT';
+
+export interface StorageRule {
+  id: string;
+  name: string;
+  priority: number;
+  enabled: boolean;
+  conditionType: StorageRuleConditionType;
+  conditionValue: string | null;
+  destinationAccountId: string;
+  destinationFolderId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CloudSearchResponse {
+  query: string;
+  results: CloudFile[];
+  failures: { accountId: string; provider: CloudProvider; message: string }[];
+}
