@@ -17,6 +17,10 @@ import { StorageRulesModule } from './storage-rules/storage-rules.module';
 import { StorageRule } from './storage-rules/entities/storage-rule.entity';
 import { AuditLog } from './audit/entities/audit-log.entity';
 import { AuditModule } from './audit/audit.module';
+import { VirtualNode } from './virtual-fs/entities/virtual-node.entity';
+import { StorageObject } from './virtual-fs/entities/storage-object.entity';
+import { StorageReplica } from './virtual-fs/entities/storage-replica.entity';
+import { StoragePolicy } from './virtual-fs/entities/storage-policy.entity';
 
 @Module({
   imports: [
@@ -36,7 +40,7 @@ import { AuditModule } from './audit/audit.module';
         password: config.get<string>('database.password'),
         database: config.get<string>('database.name'),
         autoLoadEntities: true,
-        entities: [User, CloudAccount, TransferJob, StorageRule, AuditLog],
+        entities: [User, CloudAccount, TransferJob, StorageRule, AuditLog, VirtualNode, StorageObject, StorageReplica, StoragePolicy],
         migrations: [__dirname + '/database/migrations/*{.ts,.js}'],
         synchronize: false,
         migrationsRun: false,

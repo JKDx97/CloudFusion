@@ -1,0 +1,8 @@
+export enum StorageObjectStatus {
+  AVAILABLE = 'AVAILABLE',
+  UPLOADING = 'UPLOADING',
+  DEGRADED = 'DEGRADED',
+  UNAVAILABLE = 'UNAVAILABLE',
+  DELETING = 'DELETING',
+  ERROR = 'ERROR',
+}

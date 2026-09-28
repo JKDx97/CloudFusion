@@ -5,6 +5,10 @@ import { CloudAccount } from '../cloud-accounts/entities/cloud-account.entity';
 import { TransferJob } from '../transfers/entities/transfer-job.entity';
 import { StorageRule } from '../storage-rules/entities/storage-rule.entity';
 import { AuditLog } from '../audit/entities/audit-log.entity';
+import { VirtualNode } from '../virtual-fs/entities/virtual-node.entity';
+import { StorageObject } from '../virtual-fs/entities/storage-object.entity';
+import { StorageReplica } from '../virtual-fs/entities/storage-replica.entity';
+import { StoragePolicy } from '../virtual-fs/entities/storage-policy.entity';
 
 export default new DataSource({
   type: 'postgres',
@@ -13,7 +17,7 @@ export default new DataSource({
   username: process.env.DATABASE_USER ?? 'cloudfusion',
   password: process.env.DATABASE_PASSWORD ?? 'change_me_local',
   database: process.env.DATABASE_NAME ?? 'cloudfusion',
-  entities: [User, CloudAccount, TransferJob, StorageRule, AuditLog],
+  entities: [User, CloudAccount, TransferJob, StorageRule, AuditLog, VirtualNode, StorageObject, StorageReplica, StoragePolicy],
   migrations: [__dirname + '/migrations/*{.ts,.js}'],
   synchronize: false,
 });
