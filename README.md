@@ -1,6 +1,6 @@
 # CloudFusion
 
-CloudFusion es un gestor multicloud construido sobre Angular, NestJS, TypeScript, PostgreSQL y TypeORM. La Fase 2 conecta Google Drive y OneDrive mediante OAuth 2.0 y ofrece un explorador unificado sin almacenar los archivos en CloudFusion.
+CloudFusion es un gestor multicloud construido sobre Angular, NestJS, TypeScript, PostgreSQL y TypeORM. Las Fases 2 y 3 conectan Google Drive y OneDrive mediante OAuth 2.0, ofrecen un explorador unificado y permiten orquestar transferencias entre proveedores sin almacenar los archivos permanentemente en CloudFusion.
 
 ## Stack
 
@@ -8,7 +8,7 @@ CloudFusion es un gestor multicloud construido sobre Angular, NestJS, TypeScript
 - Backend: NestJS, REST, Swagger, TypeORM y PostgreSQL.
 - Seguridad: JWT access/refresh, Argon2, AES-256-GCM para tokens cloud, Helmet, CORS, validación y rate limiting.
 - Proveedores implementados: Google Drive y Microsoft OneDrive.
-- Redis: preparado para OAuth state y cache futura; el estado OAuth actual tiene TTL en memoria para desarrollo local.
+- Redis: BullMQ para la cola de transferencias y worker; también queda disponible para cache/estado distribuido futuro.
 
 ## Instalación
 
@@ -38,6 +38,12 @@ MICROSOFT_TENANT_ID=common
 CLOUD_TOKEN_ENCRYPTION_KEY=
 CLOUD_UPLOAD_MAX_BYTES=52428800
 CLOUD_OAUTH_STATE_TTL_SECONDS=600
+
+TRANSFER_QUEUE_NAME=cloudfusion-transfers
+TRANSFER_WORKER_ENABLED=true
+TRANSFER_WORKER_CONCURRENCY=3
+TRANSFER_MAX_RETRIES=3
+TRANSFER_PROGRESS_INTERVAL_MS=1000
 ```
 
 Genera una clave de cifrado segura, por ejemplo:
@@ -137,6 +143,88 @@ npm --prefix apps/web run build
 
 Las pruebas unitarias mockean proveedores externos y cubren cifrado, ownership de cuentas y rechazo de accesos cruzados. Para una prueba real de Google u OneDrive se necesitan credenciales OAuth configuradas y una cuenta autorizada.
 
-## Fuera de la Fase 2
+## Fase 3
+
+La Fase 3 convierte el explorador en un orquestador multicloud:
+
+- Transferencias cloud-to-cloud Google Drive ↔ OneDrive.
+- Operaciones `COPY` y `MOVE`; un `MOVE` elimina el origen únicamente después de verificar el destino.
+- Streaming entre adaptadores: el archivo no se carga completo en RAM ni se guarda como ZIP temporal.
+- Cola BullMQ sobre Redis, worker con concurrencia configurable, backoff exponencial y hasta tres reintentos por defecto.
+- Cancelación, reintento manual, historial persistente, conflictos `RENAME`, `OVERWRITE` y `SKIP`.
+- Progreso persistente (`bytesTransferred`, tamaño y porcentaje) y eventos Server-Sent Events en `/transfers/:id/events`.
+- Transfer Center en Angular con pestañas de todas, activas, completadas y fallidas.
+- Smart Upload, que selecciona el proveedor según reglas de prioridad y espacio disponible conocido.
+- Storage Rules por extensión, MIME, tamaño o regla por defecto.
+- Búsqueda global concurrente con resultados parciales si un proveedor no responde.
+- Auditoría de transferencias y reglas sin registrar tokens ni headers.
+
+### Arquitectura de transferencias
+
+```text
+              ┌──────────────────┐
+              │     Angular      │
+              │ Explorer / SSE   │
+              └────────┬─────────┘
+                       │ REST
+                       ▼
+              ┌──────────────────┐
+              │ CloudFusion API  │
+              └────────┬─────────┘
+                       │ BullMQ
+                       ▼
+              ┌──────────────────┐
+              │ Redis + Worker   │
+              └───────┬───┬──────┘
+                      │   │
+             ┌────────┘   └─────────┐
+             ▼                      ▼
+       Google Drive              OneDrive
+```
+
+El worker vive inicialmente dentro del proceso NestJS para simplificar el desarrollo local; `TRANSFER_WORKER_ENABLED=false` permite arrancar solo la API y la misma cola queda preparada para separar un proceso posteriormente.
+
+### Endpoints de Fase 3
+
+| Método | Ruta | Descripción |
+| --- | --- | --- |
+| POST | `/transfers` | Encolar un COPY o MOVE |
+| GET | `/transfers` | Historial del usuario, opcionalmente filtrado por estado |
+| GET | `/transfers/:id` | Consultar una transferencia propia |
+| POST | `/transfers/:id/retry` | Reintentar una transferencia fallida/cancelada |
+| POST | `/transfers/:id/cancel` | Cancelar una transferencia |
+| DELETE | `/transfers/:id` | Eliminar un registro no activo |
+| GET/SSE | `/transfers/:id/events` | Progreso en tiempo real |
+| GET | `/cloud-search?q=` | Búsqueda concurrente multicloud |
+| GET | `/storage-rules` | Listar reglas propias |
+| POST | `/storage-rules` | Crear regla |
+| PATCH | `/storage-rules/:id` | Editar, activar, desactivar o cambiar prioridad |
+| DELETE | `/storage-rules/:id` | Eliminar regla |
+| POST | `/cloud-files/smart-upload` | Subir usando Smart Storage |
+
+Todos los endpoints están protegidos con el JWT existente y validan ownership por usuario. Los tokens de proveedores permanecen cifrados en PostgreSQL y nunca llegan a Angular ni a los logs.
+
+### Verificación de Fase 3
+
+```powershell
+# PostgreSQL y Redis deben estar disponibles
+npm --prefix apps/api run migration:run
+npm --prefix apps/api test -- --runInBand
+npm --prefix apps/api run build
+npm --prefix apps/web test -- --watch=false
+npm --prefix apps/web run build
+```
+
+Las pruebas de Fase 3 mockean Google Drive y OneDrive y cubren ownership, COPY, MOVE seguro, fallos de upload/delete, reglas por prioridad y fallback, búsqueda con fallos parciales y cifrado. La validación real entre nubes requiere credenciales OAuth y cuentas conectadas.
+
+### Limitaciones conocidas
+
+- El estado OAuth de Fase 2 sigue en memoria para desarrollo local; para múltiples instancias debe migrarse a Redis.
+- La cuota desconocida no se considera destino válido para Smart Upload.
+- El flujo de transferencia de carpetas procesa los archivos individualmente dentro del worker; no crea jobs hijos visibles por cada archivo.
+- La reanudación de sesiones resumibles queda preparada a nivel de adaptadores, pero no se implementa una sesión distribuida completa.
+- Google Workspace Docs/Sheets/Slides requieren exportación específica si se desea descargar su contenido nativo.
+
+## Fuera de las Fases 2 y 3
 
 CloudFusion todavía no implementa almacenamiento propio, sincronización entre nubes, transferencias cloud-to-cloud, Dropbox, Box, MEGA, pCloud, P2P, BitTorrent, chunking distribuido, deduplicación, CDN, Kubernetes, aplicación móvil, WebDAV ni gateway S3.
