@@ -67,4 +67,18 @@ export default () => ({
     trashRetentionDays: Number(process.env.TRASH_RETENTION_DAYS ?? 30),
     rebalanceEnabled: process.env.STORAGE_REBALANCE_ENABLED !== 'false',
   },
+  dataProtection: {
+    masterKey: process.env.CLOUDFUSION_MASTER_KEY,
+    keyVersion: Number(process.env.CLOUDFUSION_KEY_VERSION ?? 1),
+    retentionMode: process.env.DEFAULT_VERSION_RETENTION_MODE ?? 'KEEP_LAST_N',
+    retentionCount: Number(process.env.DEFAULT_VERSION_RETENTION_COUNT ?? 10),
+    snapshotSchedulerEnabled: process.env.SNAPSHOT_SCHEDULER_ENABLED !== 'false',
+    emergencySnapshotEnabled: process.env.EMERGENCY_SNAPSHOT_ENABLED !== 'false',
+    massChangeWindowSeconds: Number(process.env.MASS_CHANGE_WINDOW_SECONDS ?? 120),
+    massChangeThreshold: Number(process.env.MASS_CHANGE_THRESHOLD ?? 250),
+    storageGcEnabled: process.env.STORAGE_GC_ENABLED !== 'false',
+    storageGcGraceHours: Number(process.env.STORAGE_GC_GRACE_HOURS ?? 24),
+    backupWorkerConcurrency: Number(process.env.BACKUP_WORKER_CONCURRENCY ?? 2),
+    backupMaxRetries: Number(process.env.BACKUP_MAX_RETRIES ?? 3),
+  },
 });

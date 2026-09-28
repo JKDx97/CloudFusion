@@ -30,11 +30,47 @@ export class StorageObject {
   @Column({ type: 'varchar', length: 128 })
   checksum!: string;
 
+  @Column({ name: 'encrypted_checksum', type: 'varchar', length: 128, nullable: true })
+  encryptedChecksum!: string | null;
+
   @Column({ name: 'checksum_algorithm', type: 'varchar', length: 32, default: 'SHA-256' })
   checksumAlgorithm!: string;
 
   @Column({ type: 'enum', enum: StorageObjectStatus, default: StorageObjectStatus.UPLOADING })
   status!: StorageObjectStatus;
+
+  @Column({ name: 'encrypted_size', type: 'bigint', nullable: true })
+  encryptedSize!: string | null;
+
+  @Column({ name: 'encryption_algorithm', type: 'varchar', length: 32, nullable: true })
+  encryptionAlgorithm!: string | null;
+
+  @Column({ name: 'encrypted_dek', type: 'text', nullable: true, select: false })
+  encryptedDek!: string | null;
+
+  @Column({ name: 'dek_iv', type: 'varchar', length: 64, nullable: true, select: false })
+  dekIv!: string | null;
+
+  @Column({ name: 'dek_auth_tag', type: 'varchar', length: 64, nullable: true, select: false })
+  dekAuthTag!: string | null;
+
+  @Column({ name: 'content_iv', type: 'varchar', length: 64, nullable: true, select: false })
+  contentIv!: string | null;
+
+  @Column({ name: 'content_auth_tag', type: 'varchar', length: 64, nullable: true, select: false })
+  contentAuthTag!: string | null;
+
+  @Column({ name: 'key_version', type: 'int', nullable: true })
+  keyVersion!: number | null;
+
+  @Column({ name: 'reference_count', type: 'int', default: 1 })
+  referenceCount!: number;
+
+  @Column({ name: 'lifecycle_status', type: 'varchar', length: 24, default: 'ACTIVE' })
+  lifecycleStatus!: 'ACTIVE' | 'ORPHANED' | 'GC_PENDING' | 'DELETING' | 'DELETED' | 'ERROR';
+
+  @Column({ name: 'gc_after', type: 'timestamptz', nullable: true })
+  gcAfter!: Date | null;
 
   @Column({ name: 'policy_id', type: 'uuid', nullable: true })
   policyId!: string | null;
