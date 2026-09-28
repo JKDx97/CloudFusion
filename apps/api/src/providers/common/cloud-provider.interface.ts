@@ -32,6 +32,7 @@ export interface CloudProviderAdapter {
   revokeAuthorization(refreshToken: string): Promise<void>;
 
   listFiles(accessToken: string, accountId: string, parentId?: string): Promise<CloudFile[]>;
+  searchFiles(accessToken: string, accountId: string, query: string): Promise<CloudFile[]>;
   getFile(accessToken: string, accountId: string, fileId: string): Promise<CloudFile>;
   uploadFile(accessToken: string, accountId: string, input: ProviderUploadInput): Promise<CloudFile>;
   downloadFile(accessToken: string, accountId: string, fileId: string): Promise<CloudDownload>;

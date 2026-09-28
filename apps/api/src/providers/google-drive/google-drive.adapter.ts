@@ -41,6 +41,16 @@ export class GoogleDriveAdapter implements CloudProviderAdapter {
     return (response.data.files ?? []).map((file) => this.mapFile(file, accountId));
   }
 
+  async searchFiles(accessToken: string, accountId: string, query: string): Promise<CloudFile[]> {
+    const response = await this.drive(accessToken).files.list({
+      q: `name contains '${escapeQuery(query)}' and trashed = false`,
+      pageSize: 100,
+      orderBy: 'modifiedTime desc',
+      fields: 'files(id,name,mimeType,size,parents,createdTime,modifiedTime,webViewLink,thumbnailLink)',
+    });
+    return (response.data.files ?? []).map((file) => this.mapFile(file, accountId));
+  }
+
   async getFile(accessToken: string, accountId: string, fileId: string): Promise<CloudFile> {
     const response = await this.drive(accessToken).files.get({
       fileId,

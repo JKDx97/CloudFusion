@@ -22,6 +22,12 @@ export class OneDriveAdapter implements CloudProviderAdapter {
     return items.map((item) => this.mapFile(item, accountId));
   }
 
+  async searchFiles(accessToken: string, accountId: string, query: string): Promise<CloudFile[]> {
+    const escaped = query.replace(/'/g, "''");
+    const items = await this.listAll(accessToken, `/me/drive/root/search(q='${encodeURIComponent(escaped)}')`);
+    return items.map((item) => this.mapFile(item, accountId));
+  }
+
   async getFile(accessToken: string, accountId: string, fileId: string): Promise<CloudFile> {
     return this.mapFile(await this.request(accessToken, `/me/drive/items/${encodeURIComponent(fileId)}`), accountId);
   }

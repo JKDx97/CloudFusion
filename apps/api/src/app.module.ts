@@ -12,6 +12,7 @@ import { CloudAccountsModule } from './cloud-accounts/cloud-accounts.module';
 import { CloudFilesModule } from './cloud-files/cloud-files.module';
 import { TransferJob } from './transfers/entities/transfer-job.entity';
 import { TransfersModule } from './transfers/transfers.module';
+import { CloudSearchModule } from './cloud-search/cloud-search.module';
 
 @Module({
   imports: [
@@ -43,6 +44,7 @@ import { TransfersModule } from './transfers/transfers.module';
     CloudAccountsModule,
     CloudFilesModule,
     TransfersModule,
+    CloudSearchModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })
