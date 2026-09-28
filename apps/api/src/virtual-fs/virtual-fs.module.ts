@@ -10,6 +10,8 @@ import { VirtualNode } from './entities/virtual-node.entity';
 import { REPLICATION_QUEUE, ReplicationQueueService } from './replication-queue.service';
 import { VirtualDriveController } from './virtual-drive.controller';
 import { VirtualDriveService } from './virtual-drive.service';
+import { ReplicationWorkerService } from './replication-worker.service';
+import { ReplicaHealthService } from './replica-health.service';
 
 @Module({
   imports: [TypeOrmModule.forFeature([VirtualNode, StorageObject, StorageReplica, StoragePolicy]), ConfigModule, CloudAccountsModule, AuditModule],
@@ -22,6 +24,8 @@ import { VirtualDriveService } from './virtual-drive.service';
     },
     ReplicationQueueService,
     VirtualDriveService,
+    ReplicationWorkerService,
+    ReplicaHealthService,
   ],
   exports: [VirtualDriveService],
 })

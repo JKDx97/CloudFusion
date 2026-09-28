@@ -8,6 +8,7 @@ import {
   Post,
   Query,
   Req,
+  Res,
   UploadedFile,
   UseGuards,
   UseInterceptors,
@@ -18,6 +19,7 @@ import { diskStorage } from 'multer';
 import { mkdirSync } from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
+import type { Response } from 'express';
 import { AccessTokenGuard } from '../auth/guards/access-token.guard';
 import type { AuthenticatedRequest } from '../auth/types/authenticated-request';
 import { CreateVirtualFolderDto } from './dto/create-virtual-folder.dto';
@@ -46,6 +48,16 @@ export class VirtualDriveController {
   @Get('nodes/:id')
   @ApiOperation({ summary: 'Get one owned virtual node' })
   node(@Req() request: AuthenticatedRequest, @Param('id') id: string) { return this.service.getNode(request.user.sub, id); }
+
+  @Get('nodes/:id/download')
+  @ApiOperation({ summary: 'Download a virtual file using healthy replica failover' })
+  async download(@Req() request: AuthenticatedRequest, @Param('id') id: string, @Res() response: Response): Promise<void> {
+    const file = await this.service.download(request.user.sub, id);
+    response.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(file.fileName)}"`);
+    if (file.mimeType) response.setHeader('Content-Type', file.mimeType);
+    if (file.size != null) response.setHeader('Content-Length', String(file.size));
+    file.stream.pipe(response);
+  }
 
   @Post('folders')
   @ApiOperation({ summary: 'Create a metadata-only virtual folder' })

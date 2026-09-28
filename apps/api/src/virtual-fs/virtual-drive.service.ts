@@ -3,6 +3,7 @@ import {
   ConflictException,
   Injectable,
   NotFoundException,
+  ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -25,6 +26,7 @@ import { CreateVirtualFolderDto } from './dto/create-virtual-folder.dto';
 import { MoveVirtualNodeDto } from './dto/move-virtual-node.dto';
 import { UpdateVirtualNodeDto } from './dto/update-virtual-node.dto';
 import { ReplicationQueueService } from './replication-queue.service';
+import { CloudDownload } from '../providers/common/cloud-file.interface';
 
 export interface VirtualNodeResponse {
   id: string;
@@ -66,7 +68,37 @@ export class VirtualDriveService {
   }
 
   async getNode(userId: string, id: string): Promise<VirtualNodeResponse> {
-    return this.toResponse(await this.findOwned(id, userId));
+    const node = await this.findOwned(id, userId);
+    node.lastAccessedAt = new Date();
+    return this.toResponse(await this.nodes.save(node));
+  }
+
+  async download(userId: string, id: string): Promise<CloudDownload> {
+    const node = await this.findOwned(id, userId);
+    if (node.type !== VirtualNodeType.FILE || !node.storageObjectId) throw new BadRequestException('Only virtual files can be downloaded');
+    const object = await this.objects.findOne({ where: { id: node.storageObjectId, userId } });
+    if (!object) throw new NotFoundException('Storage object not found');
+    const replicas = await this.replicas.find({ where: { storageObjectId: object.id }, order: { status: 'ASC', lastVerifiedAt: 'DESC' } });
+    let failures = 0;
+    for (const replica of replicas.sort((a, b) => Number(b.status === StorageReplicaStatus.HEALTHY) - Number(a.status === StorageReplicaStatus.HEALTHY))) {
+      if (!replica.remoteFileId || replica.status === StorageReplicaStatus.MISSING || replica.status === StorageReplicaStatus.CORRUPTED) continue;
+      try {
+        const context = await this.accounts.getAuthorizedAccount(userId, replica.cloudAccountId);
+        const remote = await context.adapter.getFile(context.accessToken, context.account.id, replica.remoteFileId);
+        if (remote.type !== 'file') throw new Error('Remote replica is not a file');
+        const download = await context.adapter.downloadFile(context.accessToken, context.account.id, replica.remoteFileId);
+        node.lastAccessedAt = new Date();
+        await this.nodes.save(node);
+        if (failures > 0) await this.audit.record(userId, 'REPLICA_FAILOVER', 'StorageObject', object.id, { selectedReplicaId: replica.id, failures });
+        return download;
+      } catch (error) {
+        failures += 1;
+        replica.status = StorageReplicaStatus.DEGRADED;
+        replica.lastError = error instanceof Error ? error.message : 'Replica download failed';
+        await this.replicas.save(replica);
+      }
+    }
+    throw new ServiceUnavailableException('No healthy replica is available for this file');
   }
 
   async getChildren(userId: string, parentId?: string): Promise<VirtualNodeResponse[]> {
