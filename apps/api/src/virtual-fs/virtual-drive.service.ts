@@ -18,6 +18,7 @@ import { AuditService } from '../audit/audit.service';
 import { CloudAccountService, CloudAccountPublic } from '../cloud-accounts/cloud-account.service';
 import { StorageObject } from './entities/storage-object.entity';
 import { FileVersion } from './entities/file-version.entity';
+import { SnapshotEntry } from '../snapshots/entities/snapshot-entry.entity';
 import { StoragePolicy } from './entities/storage-policy.entity';
 import { StorageReplica } from './entities/storage-replica.entity';
 import { VirtualNode } from './entities/virtual-node.entity';
@@ -497,6 +498,7 @@ export class VirtualDriveService {
       const objectRepository = manager.getRepository(StorageObject);
       const nodeRepository = manager.getRepository(VirtualNode);
       const versionRepository = manager.getRepository(FileVersion);
+      const snapshotEntryRepository = manager.getRepository(SnapshotEntry);
       await manager.query(
         'SELECT "id" FROM "virtual_nodes" WHERE "id" = ANY($1::uuid[]) ORDER BY "id" FOR UPDATE',
         [all.map((item) => item.id)],
@@ -507,7 +509,12 @@ export class VirtualDriveService {
           .where('storageObject.id = :objectId AND storageObject.userId = :userId', { objectId, userId })
           .getOne();
       }
-      await versionRepository.delete({ virtualNodeId: In(all.map((item) => item.id)) });
+      const versionsToRemove = await versionRepository.find({ where: { virtualNodeId: In(all.map((item) => item.id)) } });
+      for (const version of versionsToRemove) {
+        const pinned = await snapshotEntryRepository.count({ where: { fileVersionId: version.id } });
+        if (pinned > 0) await versionRepository.update({ id: version.id }, { virtualNodeId: null });
+        else await versionRepository.delete(version.id);
+      }
       await nodeRepository.delete(all.map((item) => item.id));
       const unused: string[] = [];
       for (const objectId of objectIds) {

@@ -3,6 +3,7 @@ import { VirtualDriveService } from './virtual-drive.service';
 import { VirtualNode } from './entities/virtual-node.entity';
 import { StorageObject } from './entities/storage-object.entity';
 import { FileVersion } from './entities/file-version.entity';
+import { SnapshotEntry } from '../snapshots/entities/snapshot-entry.entity';
 import { VirtualNodeStatus } from './enums/virtual-node-status.enum';
 import { VirtualNodeType } from './enums/virtual-node-type.enum';
 
@@ -39,7 +40,8 @@ function fixture() {
     delete: jest.fn(),
   };
   const objects = { findOne: jest.fn(), save: jest.fn(), create: jest.fn(), createQueryBuilder: jest.fn(), delete: jest.fn(), count: jest.fn() };
-  const fileVersions = { find: jest.fn(), save: jest.fn(), create: jest.fn(), delete: jest.fn(), count: jest.fn() };
+  const fileVersions = { find: jest.fn(), save: jest.fn(), create: jest.fn(), delete: jest.fn(), update: jest.fn(), count: jest.fn() };
+  const snapshotEntries = { count: jest.fn().mockResolvedValue(0) };
   const replicas = { findOne: jest.fn(), find: jest.fn(), save: jest.fn(), create: jest.fn(), count: jest.fn() };
   const policies = { findOne: jest.fn(), save: jest.fn(), create: jest.fn((value: unknown) => value) };
   const accounts = { list: jest.fn(), getOwnedAccount: jest.fn() };
@@ -49,7 +51,7 @@ function fixture() {
   const dataSource = { transaction: jest.fn() };
   const config = { get: jest.fn((key: string) => key === 'virtualDrive.defaultReplicationFactor' ? 1 : undefined) };
   const service = new VirtualDriveService(nodes as never, objects as never, replicas as never, policies as never, accounts as never, queue as never, audit as never, config as never, dataSource as never, encryption as never, fileVersions as never);
-  return { service, nodes, objects, fileVersions, replicas, policies, accounts, queue, audit, encryption, dataSource };
+  return { service, nodes, objects, fileVersions, snapshotEntries, replicas, policies, accounts, queue, audit, encryption, dataSource };
 }
 
 describe('VirtualDriveService', () => {
@@ -127,6 +129,7 @@ describe('VirtualDriveService', () => {
     const fixtureData = fixture();
     fixtureData.nodes.findOne.mockResolvedValueOnce(file).mockResolvedValueOnce(file).mockResolvedValueOnce(root).mockResolvedValueOnce(null);
     fixtureData.nodes.find.mockResolvedValue([]);
+    fixtureData.fileVersions.find.mockResolvedValue([]);
     fixtureData.nodes.save.mockImplementation(async (value: VirtualNode) => value);
 
     await expect(fixtureData.service.trash('owner-id', 'file-id')).resolves.toEqual({ deleted: true });
@@ -150,13 +153,20 @@ describe('VirtualDriveService', () => {
     const fixtureData = fixture();
     fixtureData.nodes.findOne.mockResolvedValue(trashedFile);
     fixtureData.nodes.find.mockResolvedValue([]);
+    fixtureData.fileVersions.find.mockResolvedValue([{ id: 'copy-version', storageObjectId: 'shared-object' }]);
     fixtureData.fileVersions.count.mockResolvedValue(1);
     fixtureData.objects.createQueryBuilder.mockReturnValue(lockQuery);
     fixtureData.objects.findOne.mockResolvedValue(storageObject);
     fixtureData.objects.save.mockImplementation(async (value) => value);
     fixtureData.dataSource.transaction.mockImplementation(async (callback: (manager: unknown) => Promise<unknown>) => callback({
       query: jest.fn(),
-      getRepository: (entity: unknown) => entity === StorageObject ? fixtureData.objects : entity === FileVersion ? fixtureData.fileVersions : fixtureData.nodes,
+      getRepository: (entity: unknown) => entity === StorageObject
+        ? fixtureData.objects
+        : entity === FileVersion
+          ? fixtureData.fileVersions
+          : entity === SnapshotEntry
+            ? fixtureData.snapshotEntries
+            : fixtureData.nodes,
     }));
 
     await expect(fixtureData.service.permanentDelete('owner-id', 'duplicate-node')).resolves.toEqual({ deleted: true });
@@ -167,5 +177,39 @@ describe('VirtualDriveService', () => {
     expect(fixtureData.objects.delete).not.toHaveBeenCalled();
     expect(fixtureData.replicas.find).not.toHaveBeenCalled();
     expect(fixtureData.queue.enqueue).not.toHaveBeenCalled();
+  });
+
+  it('preserves snapshot-pinned versions and their storage objects on permanent node deletion', async () => {
+    const trashedFile = node({
+      id: 'file-id', name: 'thesis.pdf', type: VirtualNodeType.FILE, isRoot: false,
+      parentId: 'root-id', storageObjectId: 'pinned-object', currentVersionId: 'pinned-version', deletedAt: new Date(),
+    });
+    const storageObject = { id: 'pinned-object', userId: 'owner-id', referenceCount: 1, lifecycleStatus: 'ACTIVE' };
+    const lockQuery = { setLock: jest.fn().mockReturnThis(), where: jest.fn().mockReturnThis(), getOne: jest.fn().mockResolvedValue(storageObject) };
+    const fixtureData = fixture();
+    fixtureData.nodes.findOne.mockResolvedValue(trashedFile);
+    fixtureData.nodes.find.mockResolvedValue([]);
+    fixtureData.fileVersions.find.mockResolvedValue([{ id: 'pinned-version', storageObjectId: 'pinned-object' }]);
+    fixtureData.fileVersions.count.mockResolvedValue(1);
+    fixtureData.snapshotEntries.count.mockResolvedValue(1);
+    fixtureData.objects.createQueryBuilder.mockReturnValue(lockQuery);
+    fixtureData.objects.findOne.mockResolvedValue(storageObject);
+    fixtureData.dataSource.transaction.mockImplementation(async (callback: (manager: unknown) => Promise<unknown>) => callback({
+      query: jest.fn(),
+      getRepository: (entity: unknown) => entity === StorageObject
+        ? fixtureData.objects
+        : entity === FileVersion
+          ? fixtureData.fileVersions
+          : entity === SnapshotEntry
+            ? fixtureData.snapshotEntries
+            : fixtureData.nodes,
+    }));
+
+    await expect(fixtureData.service.permanentDelete('owner-id', 'file-id')).resolves.toEqual({ deleted: true });
+
+    expect(fixtureData.fileVersions.update).toHaveBeenCalledWith({ id: 'pinned-version' }, { virtualNodeId: null });
+    expect(fixtureData.fileVersions.delete).not.toHaveBeenCalled();
+    expect(fixtureData.objects.delete).not.toHaveBeenCalled();
+    expect(fixtureData.replicas.find).not.toHaveBeenCalled();
   });
 });
