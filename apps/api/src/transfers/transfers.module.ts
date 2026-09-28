@@ -9,9 +9,10 @@ import { TransferProgressService } from './transfer-progress.service';
 import { TransferExecutionService } from './transfer-execution.service';
 import { TransferWorkerService } from './transfer-worker.service';
 import { AuditModule } from '../audit/audit.module';
+import { CloudAccountsModule } from '../cloud-accounts/cloud-accounts.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([TransferJob]), ConfigModule, AuditModule],
+  imports: [TypeOrmModule.forFeature([TransferJob]), ConfigModule, AuditModule, CloudAccountsModule],
   controllers: [TransferController],
   providers: [
     {
