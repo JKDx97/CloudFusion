@@ -83,6 +83,7 @@ export default () => ({
     massChangeThreshold: Number(process.env.MASS_CHANGE_THRESHOLD ?? 250),
     storageGcEnabled: process.env.STORAGE_GC_ENABLED !== 'false',
     storageGcGraceHours: Number(process.env.STORAGE_GC_GRACE_HOURS ?? 24),
+    storageGcIntervalMinutes: Number(process.env.STORAGE_GC_INTERVAL_MINUTES ?? 60),
     backupWorkerConcurrency: Number(process.env.BACKUP_WORKER_CONCURRENCY ?? 2),
     backupMaxRetries: Number(process.env.BACKUP_MAX_RETRIES ?? 3),
   },
