@@ -10,6 +10,8 @@ import { UsersModule } from './users/users.module';
 import { CloudAccount } from './cloud-accounts/entities/cloud-account.entity';
 import { CloudAccountsModule } from './cloud-accounts/cloud-accounts.module';
 import { CloudFilesModule } from './cloud-files/cloud-files.module';
+import { TransferJob } from './transfers/entities/transfer-job.entity';
+import { TransfersModule } from './transfers/transfers.module';
 
 @Module({
   imports: [
@@ -29,7 +31,7 @@ import { CloudFilesModule } from './cloud-files/cloud-files.module';
         password: config.get<string>('database.password'),
         database: config.get<string>('database.name'),
         autoLoadEntities: true,
-        entities: [User, CloudAccount],
+        entities: [User, CloudAccount, TransferJob],
         migrations: [__dirname + '/database/migrations/*{.ts,.js}'],
         synchronize: false,
         migrationsRun: false,
@@ -40,6 +42,7 @@ import { CloudFilesModule } from './cloud-files/cloud-files.module';
     AuthModule,
     CloudAccountsModule,
     CloudFilesModule,
+    TransfersModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })

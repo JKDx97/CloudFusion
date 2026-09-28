@@ -50,4 +50,11 @@ export default () => ({
         'http://localhost:3000/cloud-accounts/onedrive/callback',
     },
   },
+  transfer: {
+    queueName: process.env.TRANSFER_QUEUE_NAME ?? 'cloudfusion-transfers',
+    workerEnabled: process.env.TRANSFER_WORKER_ENABLED !== 'false',
+    workerConcurrency: Number(process.env.TRANSFER_WORKER_CONCURRENCY ?? 3),
+    maxRetries: Number(process.env.TRANSFER_MAX_RETRIES ?? 3),
+    progressIntervalMs: Number(process.env.TRANSFER_PROGRESS_INTERVAL_MS ?? 1000),
+  },
 });

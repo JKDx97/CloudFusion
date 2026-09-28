@@ -2,6 +2,7 @@ import 'dotenv/config';
 import { DataSource } from 'typeorm';
 import { User } from '../users/entities/user.entity';
 import { CloudAccount } from '../cloud-accounts/entities/cloud-account.entity';
+import { TransferJob } from '../transfers/entities/transfer-job.entity';
 
 export default new DataSource({
   type: 'postgres',
@@ -10,7 +11,7 @@ export default new DataSource({
   username: process.env.DATABASE_USER ?? 'cloudfusion',
   password: process.env.DATABASE_PASSWORD ?? 'change_me_local',
   database: process.env.DATABASE_NAME ?? 'cloudfusion',
-  entities: [User, CloudAccount],
+  entities: [User, CloudAccount, TransferJob],
   migrations: [__dirname + '/migrations/*{.ts,.js}'],
   synchronize: false,
 });
