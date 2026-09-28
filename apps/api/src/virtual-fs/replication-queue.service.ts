@@ -6,7 +6,9 @@ export const REPLICATION_QUEUE = Symbol('REPLICATION_QUEUE');
 
 export interface ReplicationJobPayload {
   replicaId: string;
-  stagingPath: string;
+  stagingPath?: string;
+  action?: 'UPLOAD' | 'DELETE';
+  rootNodeId?: string;
 }
 
 @Injectable()

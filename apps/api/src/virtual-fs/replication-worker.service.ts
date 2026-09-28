@@ -58,6 +58,11 @@ export class ReplicationWorkerService implements OnModuleInit, OnModuleDestroy {
     if (!replica) return;
     const object = await this.objects.findOne({ where: { id: replica.storageObjectId } });
     if (!object) return;
+    if (job.data.action === 'DELETE') {
+      await this.deleteReplica(job, replica, object);
+      return;
+    }
+    if (!job.data.stagingPath) throw new Error('Replication upload is missing its staging path');
     replica.status = StorageReplicaStatus.UPLOADING;
     replica.attempts += 1;
     replica.lastError = null;
@@ -92,6 +97,42 @@ export class ReplicationWorkerService implements OnModuleInit, OnModuleDestroy {
       await this.cleanupStaging(object.id, job.data.stagingPath);
       await this.audit.record(object.userId, 'REPLICA_UPLOAD_FAILED', 'StorageReplica', replica.id, { storageObjectId: object.id });
     }
+  }
+
+  private async deleteReplica(job: Job<ReplicationJobPayload>, replica: StorageReplica, object: StorageObject): Promise<void> {
+    try {
+      if (replica.remoteFileId) {
+        const context = await this.accounts.getAuthorizedAccount(object.userId, replica.cloudAccountId);
+        await context.adapter.deleteItem(context.accessToken, context.account.id, replica.remoteFileId);
+      }
+      await this.replicas.delete(replica.id);
+      await this.finalizeDeletedTree(object.userId, job.data.rootNodeId ?? '', object.id);
+      await this.audit.record(object.userId, 'REPLICA_DELETED', 'StorageReplica', replica.id, { storageObjectId: object.id });
+    } catch (error) {
+      replica.status = StorageReplicaStatus.FAILED;
+      replica.lastError = error instanceof Error ? error.message : 'Replica deletion failed';
+      await this.replicas.save(replica);
+      throw error;
+    }
+  }
+
+  private async finalizeDeletedTree(userId: string, rootNodeId: string, objectId: string): Promise<void> {
+    const root = await this.nodes.findOne({ where: { id: rootNodeId || undefined, userId } });
+    if (!root) return;
+    const tree = [root, ...(await this.collectNodes(userId, root.id))];
+    const objectIds = [...new Set(tree.map((node) => node.storageObjectId).filter((id): id is string => Boolean(id)))];
+    if (!objectIds.includes(objectId)) objectIds.push(objectId);
+    const pending = await this.replicas.find({ where: objectIds.map((id) => ({ storageObjectId: id })) });
+    if (pending.length > 0) return;
+    await this.objects.delete(objectIds);
+    await this.nodes.delete(tree.map((node) => node.id));
+  }
+
+  private async collectNodes(userId: string, parentId: string): Promise<VirtualNode[]> {
+    const children = await this.nodes.find({ where: { userId, parentId } });
+    const result: VirtualNode[] = [];
+    for (const child of children) result.push(child, ...(await this.collectNodes(userId, child.id)));
+    return result;
   }
 
   private async ensureManagedObjectsFolder(accessToken: string, accountId: string, adapter: import('../providers/common/cloud-provider.interface').CloudProviderAdapter): Promise<{ id: string }> {

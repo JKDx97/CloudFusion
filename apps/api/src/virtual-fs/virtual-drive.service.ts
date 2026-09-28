@@ -280,9 +280,30 @@ export class VirtualDriveService {
     const descendants = await this.collectTree(userId, node, true);
     const all = [node, ...descendants];
     const objectIds = all.map((item) => item.storageObjectId).filter((value): value is string => Boolean(value));
-    if (objectIds.length) await this.objects.delete(objectIds);
-    await this.nodes.delete(all.map((item) => item.id));
-    await this.audit.record(userId, 'VIRTUAL_NODE_PERMANENTLY_DELETED', 'VirtualNode', id, { descendants: descendants.length });
+    const physicalReplicas = objectIds.length ? await this.replicas.find({ where: objectIds.map((storageObjectId) => ({ storageObjectId })) }) : [];
+    if (physicalReplicas.length === 0) {
+      if (objectIds.length) await this.objects.delete(objectIds);
+      await this.nodes.delete(all.map((item) => item.id));
+      await this.audit.record(userId, 'VIRTUAL_NODE_PERMANENTLY_DELETED', 'VirtualNode', id, { descendants: descendants.length, queued: false });
+      return { deleted: true };
+    }
+    for (const item of all) {
+      item.status = VirtualNodeStatus.DELETING;
+      await this.nodes.save(item);
+    }
+    for (const objectId of objectIds) {
+      const object = await this.objects.findOne({ where: { id: objectId, userId } });
+      if (object) {
+        object.status = StorageObjectStatus.DELETING;
+        await this.objects.save(object);
+      }
+    }
+    for (const replica of physicalReplicas) {
+      replica.status = StorageReplicaStatus.DELETING;
+      await this.replicas.save(replica);
+      await this.queue.enqueue({ replicaId: replica.id, action: 'DELETE', rootNodeId: node.id });
+    }
+    await this.audit.record(userId, 'VIRTUAL_NODE_PERMANENT_DELETE_QUEUED', 'VirtualNode', id, { descendants: descendants.length, replicas: physicalReplicas.length });
     return { deleted: true };
   }
 
