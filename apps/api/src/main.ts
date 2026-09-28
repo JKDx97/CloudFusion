@@ -28,7 +28,7 @@ async function bootstrap() {
 
   const swaggerConfig = new DocumentBuilder()
     .setTitle('CloudFusion API')
-    .setDescription('API de identidad y autenticación de CloudFusion')
+    .setDescription('API de identidad, proveedores cloud y CloudFusion Drive')
     .setVersion('1.0')
     .addBearerAuth()
     .build();

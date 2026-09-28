@@ -1,6 +1,6 @@
 # CloudFusion
 
-CloudFusion es un gestor multicloud construido sobre Angular, NestJS, TypeScript, PostgreSQL y TypeORM. Las Fases 2 y 3 conectan Google Drive y OneDrive mediante OAuth 2.0, ofrecen un explorador unificado y permiten orquestar transferencias entre proveedores sin almacenar los archivos permanentemente en CloudFusion.
+CloudFusion es un gestor multicloud construido sobre Angular, NestJS, TypeScript, PostgreSQL y TypeORM. Las Fases 2 y 3 conectan Google Drive y OneDrive mediante OAuth 2.0 y orquestan transferencias entre proveedores. La Fase 4 agrega CloudFusion Drive: un sistema de archivos virtual cuyo índice y organización viven en PostgreSQL, mientras el contenido físico se guarda en réplicas administradas sobre las cuentas cloud del usuario.
 
 ## Stack
 
@@ -9,6 +9,7 @@ CloudFusion es un gestor multicloud construido sobre Angular, NestJS, TypeScript
 - Seguridad: JWT access/refresh, Argon2, AES-256-GCM para tokens cloud, Helmet, CORS, validación y rate limiting.
 - Proveedores implementados: Google Drive y Microsoft OneDrive.
 - Redis: BullMQ para la cola de transferencias y worker; también queda disponible para cache/estado distribuido futuro.
+- CloudFusion Drive: índice virtual, políticas de replicación, réplicas físicas, checksum SHA-256, failover, reparación y papelera.
 
 ## Instalación
 
@@ -217,6 +218,85 @@ npm --prefix apps/web run build
 
 Las pruebas de Fase 3 mockean Google Drive y OneDrive y cubren ownership, COPY, MOVE seguro, fallos de upload/delete, reglas por prioridad y fallback, búsqueda con fallos parciales y cifrado. La validación real entre nubes requiere credenciales OAuth y cuentas conectadas.
 
+## Fase 4 — CloudFusion Drive
+
+CloudFusion Drive separa la identidad lógica del archivo de su ubicación física:
+
+```text
+Angular /drive
+      │ JWT
+      ▼
+VirtualDriveController
+      │ PostgreSQL metadata index
+      ├── VirtualNode (carpetas, nombres, papelera, favoritos)
+      ├── StorageObject (contenido lógico, checksum, política)
+      └── StorageReplica (cuenta, proveedor, remoteFileId, estado)
+              │ BullMQ / Redis
+              ▼
+      ReplicationWorker → Google Drive / OneDrive
+```
+
+Las carpetas son inicialmente metadata-only. Mover o renombrar en Drive solo cambia `parentId` o `name`; no dispara una transferencia física. Los objetos físicos se guardan bajo una carpeta administrada por CloudFusion (`CloudFusion/objects`) y se identifican con una clave estable independiente del nombre virtual.
+
+### Políticas y estados
+
+- `STANDARD` crea una réplica; `REDUNDANT` puede crear réplicas en cuentas y proveedores distintos; `ARCHIVE` y `CUSTOM` quedan modeladas para extensiones posteriores.
+- Un archivo lógico puede estar `AVAILABLE`, `UPLOADING`, `DEGRADED`, `UNAVAILABLE`, `DELETING` o `ERROR`.
+- Una réplica puede estar `PENDING`, `UPLOADING`, `HEALTHY`, `DEGRADED`, `MISSING`, `CORRUPTED`, `FAILED`, `DELETING` o `REPAIRING`.
+- Las descargas prueban primero réplicas saludables y hacen failover automático. Los fallos se auditan como `REPLICA_FAILOVER`.
+- El verificador remoto comprueba existencia, tamaño y SHA-256 por streaming. `REPLICA_AUTO_REPAIR=true` encola una copia desde otra réplica saludable cuando es posible.
+
+### Endpoints del Drive virtual
+
+| Método | Ruta | Descripción |
+| --- | --- | --- |
+| GET | `/virtual-drive/root` | Inicializa y devuelve la raíz del usuario |
+| GET | `/virtual-drive/nodes/:id/children` | Navega el índice virtual |
+| POST | `/virtual-drive/folders` | Crea una carpeta metadata-only |
+| POST | `/virtual-drive/upload` | Crea el objeto lógico y encola sus réplicas |
+| GET | `/virtual-drive/nodes/:id/download` | Descarga con failover |
+| PATCH | `/virtual-drive/nodes/:id` | Renombra sin tocar el proveedor |
+| POST | `/virtual-drive/nodes/:id/move` | Mueve cambiando solo metadata |
+| DELETE | `/virtual-drive/nodes/:id` | Papelera soft-delete |
+| POST | `/virtual-drive/nodes/:id/restore` | Restaura desde papelera |
+| DELETE | `/virtual-drive/nodes/:id/permanent` | Elimina metadata y réplicas definitivamente |
+| GET | `/virtual-drive/recent` | Archivos accedidos recientemente |
+| GET | `/virtual-drive/favorites` | Favoritos del usuario |
+| GET | `/virtual-drive/trash` | Elementos en papelera |
+| GET | `/virtual-drive/storage-overview` | Uso lógico, físico y objetos degradados |
+| GET | `/virtual-drive/accounts/:accountId/impact` | Impacto antes de desconectar una cuenta |
+| POST | `/virtual-drive/replicas/:replicaId/verify` | Verificación manual de integridad |
+| POST | `/virtual-drive/rebalance` | Encola reparaciones para objetos degradados |
+
+Todos los endpoints exigen JWT y filtran por `userId`; un ID de otro usuario devuelve `404` y no permite inferir su existencia. Las migraciones son explícitas y `synchronize` permanece desactivado.
+
+### Variables de entorno de Fase 4
+
+```env
+DEFAULT_REPLICATION_FACTOR=1
+REPLICA_AUTO_REPAIR=true
+REPLICA_VERIFY_INTERVAL_HOURS=24
+REPLICATION_WORKER_CONCURRENCY=2
+REPLICATION_QUEUE_NAME=cloudfusion-replication
+REPLICATION_WORKER_ENABLED=true
+TRASH_RETENTION_DAYS=30
+STORAGE_REBALANCE_ENABLED=true
+```
+
+En desarrollo local sin Redis se puede usar `TRANSFER_WORKER_ENABLED=false` y `REPLICATION_WORKER_ENABLED=false`; la API y la navegación del índice siguen disponibles, pero las cargas físicas quedan pendientes hasta arrancar Redis y los workers.
+
+### Verificación de Fase 4
+
+```powershell
+npm --prefix apps/api run migration:run
+npm --prefix apps/api test -- --runInBand
+npm --prefix apps/api run build
+npm --prefix apps/web test -- --watch=false
+npm --prefix apps/web run build
+```
+
+Las pruebas cubren raíz por usuario, ownership, carpetas, nombres duplicados, movimiento, papelera y restauración. La validación real de réplicas necesita cuentas OAuth conectadas y Redis disponible.
+
 ### Limitaciones conocidas
 
 - El estado OAuth de Fase 2 sigue en memoria para desarrollo local; para múltiples instancias debe migrarse a Redis.
@@ -225,6 +305,6 @@ Las pruebas de Fase 3 mockean Google Drive y OneDrive y cubren ownership, COPY, 
 - La reanudación de sesiones resumibles queda preparada a nivel de adaptadores, pero no se implementa una sesión distribuida completa.
 - Google Workspace Docs/Sheets/Slides requieren exportación específica si se desea descargar su contenido nativo.
 
-## Fuera de las Fases 2 y 3
+## Fuera del alcance actual
 
-CloudFusion todavía no implementa almacenamiento propio, sincronización entre nubes, transferencias cloud-to-cloud, Dropbox, Box, MEGA, pCloud, P2P, BitTorrent, chunking distribuido, deduplicación, CDN, Kubernetes, aplicación móvil, WebDAV ni gateway S3.
+CloudFusion todavía no implementa Dropbox, Box, MEGA, pCloud, P2P, BitTorrent, erasure coding/RAID, deduplicación, cifrado end-to-end, montaje local, WebDAV, gateway S3, CDN, Kubernetes ni aplicación móvil.
