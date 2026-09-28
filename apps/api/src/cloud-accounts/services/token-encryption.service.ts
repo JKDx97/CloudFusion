@@ -20,10 +20,13 @@ export class TokenEncryptionService {
       throw new BadRequestException('Invalid encrypted token');
     }
     try {
-      const decipher = createDecipheriv('aes-256-gcm', this.getKey(), Buffer.from(ivValue, 'base64url'));
-      decipher.setAuthTag(Buffer.from(tagValue, 'base64url'));
+      const iv = this.decodeBase64Url(ivValue);
+      const tag = this.decodeBase64Url(tagValue);
+      const ciphertext = this.decodeBase64Url(ciphertextValue);
+      const decipher = createDecipheriv('aes-256-gcm', this.getKey(), iv);
+      decipher.setAuthTag(tag);
       return Buffer.concat([
-        decipher.update(Buffer.from(ciphertextValue, 'base64url')),
+        decipher.update(ciphertext),
         decipher.final(),
       ]).toString('utf8');
     } catch {
@@ -38,5 +41,12 @@ export class TokenEncryptionService {
     const key = Buffer.from(configured, 'base64');
     if (key.length !== 32) throw new Error('CLOUD_TOKEN_ENCRYPTION_KEY must encode 32 bytes');
     return key;
+  }
+
+  private decodeBase64Url(value: string): Buffer {
+    if (!/^[A-Za-z0-9_-]+$/.test(value)) throw new Error('Invalid base64url');
+    const decoded = Buffer.from(value, 'base64url');
+    if (decoded.toString('base64url') !== value) throw new Error('Non-canonical base64url');
+    return decoded;
   }
 }
