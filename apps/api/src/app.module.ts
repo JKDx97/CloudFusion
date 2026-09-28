@@ -25,6 +25,7 @@ import { VirtualFsModule } from './virtual-fs/virtual-fs.module';
 import { SnapshotsModule } from './snapshots/snapshots.module';
 import { BackupsModule } from './backups/backups.module';
 import { ProtectionModule } from './protection/protection.module';
+import { RealtimeModule } from './realtime/realtime.module';
 
 @Module({
   imports: [
@@ -33,6 +34,7 @@ import { ProtectionModule } from './protection/protection.module';
       cache: true,
       load: [configuration],
     }),
+    RealtimeModule,
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 60 }]),
     TypeOrmModule.forRootAsync({
       inject: [ConfigService],

@@ -3,7 +3,7 @@ import { Component, DestroyRef, OnInit, inject, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { FormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
-import { forkJoin, interval, startWith, switchMap } from 'rxjs';
+import { filter, forkJoin, interval, map, merge, retry, startWith, switchMap } from 'rxjs';
 import { CloudService } from '../../core/cloud/cloud.service';
 import { BackupJobRecord, BackupPolicyRecord, CloudAccount, ProtectionAlertRecord, ProtectionOverviewRecord, SnapshotEntryRecord, SnapshotRecord, SnapshotRestoreJobRecord } from '../../shared/models/cloud.model';
 
@@ -44,7 +44,12 @@ export class ProtectionComponent implements OnInit {
       error: () => undefined,
     });
     this.cloud.listBackupPolicies().pipe(takeUntilDestroyed(this.destroyRef)).subscribe({ next: (policies) => this.backupPolicies.set(policies), error: () => undefined });
-    interval(5000).pipe(startWith(0), switchMap(() => forkJoin({
+    const realtimeRefresh = this.cloud.streamProtectionEvents().pipe(
+      retry({ delay: 5000 }),
+      filter((event) => event.type !== 'HEARTBEAT'),
+      map(() => 0),
+    );
+    merge(interval(30_000).pipe(startWith(0)), realtimeRefresh).pipe(switchMap(() => forkJoin({
       restoreJobs: this.cloud.listSnapshotRestoreJobs(), backups: this.cloud.listBackups(),
       snapshots: this.cloud.listSnapshots(), alerts: this.cloud.listProtectionAlerts(), overview: this.cloud.getProtectionOverview(),
     })), takeUntilDestroyed(this.destroyRef)).subscribe({

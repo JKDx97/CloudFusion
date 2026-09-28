@@ -4,7 +4,7 @@ import { Observable, map } from 'rxjs';
 import { AuthService } from '../auth/auth.service';
 import { environment } from '../../../environments/environment';
 import { ApiResponse } from '../../shared/models/api-response.model';
-import { BackupJobRecord, BackupPolicyRecord, CloudAccount, CloudAccountImpactRecord, CloudFile, CloudProvider, CloudSearchResponse, CloudStorageSummary, FileVersionRecord, ProtectionAlertRecord, ProtectionOverviewRecord, SnapshotEntryRecord, SnapshotRecord, SnapshotRestoreJobRecord, StorageRule, TransferJob, TransferProgressEvent, TransferOperation, VirtualNode } from '../../shared/models/cloud.model';
+import { BackupJobRecord, BackupPolicyRecord, CloudAccount, CloudAccountImpactRecord, CloudFile, CloudProvider, CloudSearchResponse, CloudStorageSummary, DataProtectionEventRecord, FileVersionRecord, ProtectionAlertRecord, ProtectionOverviewRecord, SnapshotEntryRecord, SnapshotRecord, SnapshotRestoreJobRecord, StorageRule, TransferJob, TransferProgressEvent, TransferOperation, VirtualNode } from '../../shared/models/cloud.model';
 
 @Injectable({ providedIn: 'root' })
 export class CloudService {
@@ -279,6 +279,37 @@ export class CloudService {
 
   getProtectionOverview(): Observable<ProtectionOverviewRecord> {
     return this.http.get<ApiResponse<ProtectionOverviewRecord>>(`${this.apiUrl}/protection/overview`).pipe(map((response) => response.data));
+  }
+
+  streamProtectionEvents(): Observable<DataProtectionEventRecord> {
+    return new Observable<DataProtectionEventRecord>((subscriber) => {
+      const controller = new AbortController();
+      const token = this.auth.accessToken;
+      void fetch(`${this.apiUrl}/protection/events`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+        signal: controller.signal,
+      }).then(async (response) => {
+        if (!response.ok || !response.body) throw new Error('Protection event stream unavailable');
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        while (true) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          buffer += decoder.decode(chunk.value, { stream: true });
+          const messages = buffer.split('\n\n');
+          buffer = messages.pop() ?? '';
+          for (const message of messages) {
+            const data = message.split('\n').find((line) => line.startsWith('data:'))?.slice(5).trim();
+            if (data) subscriber.next(JSON.parse(data) as DataProtectionEventRecord);
+          }
+        }
+        subscriber.complete();
+      }).catch((error: unknown) => {
+        if (!controller.signal.aborted) subscriber.error(error);
+      });
+      return () => controller.abort();
+    });
   }
 
   listProtectionAlerts(): Observable<ProtectionAlertRecord[]> {

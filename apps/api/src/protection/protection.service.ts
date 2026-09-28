@@ -15,6 +15,7 @@ import { VirtualNodeStatus } from '../virtual-fs/enums/virtual-node-status.enum'
 import { VirtualNodeType } from '../virtual-fs/enums/virtual-node-type.enum';
 import { StorageReplicaStatus } from '../virtual-fs/enums/storage-replica-status.enum';
 import { ProtectionAlert } from './entities/protection-alert.entity';
+import { DataProtectionEventsService } from '../realtime/data-protection-events.service';
 
 const MONITORED_ACTIONS = [
   'VIRTUAL_FILE_VERSION_CREATED',
@@ -45,6 +46,7 @@ export class ProtectionService implements OnModuleInit, OnModuleDestroy {
     private readonly config: ConfigService,
     private readonly audit: AuditService,
     private readonly snapshotService: SnapshotsService,
+    private readonly protectionEvents?: DataProtectionEventsService,
   ) {}
 
   onModuleInit(): void {
@@ -126,6 +128,7 @@ export class ProtectionService implements OnModuleInit, OnModuleDestroy {
         if (!alert) continue;
         created += 1;
         await this.audit.record(alert.userId, 'MASS_CHANGE_DETECTED', 'ProtectionAlert', alert.id, { eventCount: alert.eventCount, windowSeconds });
+        this.protectionEvents?.emit(alert.userId, 'MASS_CHANGE_DETECTED', alert.id, alert.status, { eventCount: alert.eventCount, windowSeconds });
         if (this.config.get<boolean>('dataProtection.emergencySnapshotEnabled') !== false) await this.makeEmergencySnapshot(alert);
       }
       return created;

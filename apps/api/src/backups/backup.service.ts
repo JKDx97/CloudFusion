@@ -1,4 +1,4 @@
-import { BadRequestException, Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException, OnModuleDestroy, OnModuleInit, Optional } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { ConfigService } from '@nestjs/config';
 import { DataSource, In, LessThan, LessThanOrEqual, Repository } from 'typeorm';
@@ -24,6 +24,7 @@ import { BackupVerificationService } from './backup-verification.service';
 import { Snapshot } from '../snapshots/entities/snapshot.entity';
 import { ProviderErrorCode, providerHttpError } from '../providers/common/provider-error';
 import { CloudDownload } from '../providers/common/cloud-file.interface';
+import { DataProtectionEventsService } from '../realtime/data-protection-events.service';
 
 @Injectable()
 export class BackupService implements OnModuleInit, OnModuleDestroy {
@@ -48,6 +49,7 @@ export class BackupService implements OnModuleInit, OnModuleDestroy {
     private readonly verification: BackupVerificationService,
     private readonly audit: AuditService,
     private readonly config: ConfigService,
+    @Optional() private readonly protectionEvents?: DataProtectionEventsService,
   ) {}
 
   onModuleInit(): void {
@@ -198,6 +200,7 @@ export class BackupService implements OnModuleInit, OnModuleDestroy {
     job.itemsProcessed = alreadyCopied.length;
     job.bytesProcessed = String(alreadyCopied.reduce((sum, copy) => sum + Number(copy.size), 0));
     await this.jobs.save(job);
+    this.protectionEvents?.emit(job.userId, 'BACKUP_STARTED', job.id, job.status, { itemsProcessed: job.itemsProcessed });
     try {
       await this.accounts.getAuthorizedAccount(job.userId, job.destinationAccountId);
       if (!job.snapshotId) {
@@ -230,6 +233,7 @@ export class BackupService implements OnModuleInit, OnModuleDestroy {
             job.itemsProcessed += 1;
             job.bytesProcessed = String(Number(job.bytesProcessed) + Number(copy.size));
             await this.jobs.save(job);
+            this.protectionEvents?.emit(job.userId, 'BACKUP_PROGRESS', job.id, 'VERIFYING', { itemsProcessed: job.itemsProcessed, bytesProcessed: Number(job.bytesProcessed) });
           } catch (error) {
             errors.push({ entryId: entry.id, message: this.safeError(error) });
           }
@@ -240,12 +244,14 @@ export class BackupService implements OnModuleInit, OnModuleDestroy {
       job.status = errors.length ? (attemptsMade + 1 < maxAttempts ? 'QUEUED' : 'FAILED') : 'COMPLETED';
       await this.jobs.save(job);
       if (errors.length) throw new Error('BACKUP_FAILED');
+      this.protectionEvents?.emit(job.userId, 'BACKUP_COMPLETED', job.id, job.status, { itemsProcessed: job.itemsProcessed, bytesProcessed: Number(job.bytesProcessed) });
       await this.audit.record(job.userId, 'BACKUP_COMPLETED', 'BackupJob', job.id, { itemsProcessed: job.itemsProcessed, bytesProcessed: Number(job.bytesProcessed), verifiedObjects: job.itemsProcessed });
     } catch (error) {
       job.status = attemptsMade + 1 < maxAttempts ? 'QUEUED' : 'FAILED';
       job.completedAt = job.status === 'FAILED' ? new Date() : null;
       job.errors = [...job.errors, { entryId: '', message: this.safeError(error) }];
       await this.jobs.save(job);
+      if (job.status === 'FAILED') this.protectionEvents?.emit(job.userId, 'BACKUP_FAILED', job.id, job.status);
       await this.audit.record(job.userId, job.status === 'FAILED' ? 'BACKUP_FAILED' : 'BACKUP_RETRY_SCHEDULED', 'BackupJob', job.id, { reason: this.safeError(error) });
       throw error;
     }
@@ -372,6 +378,7 @@ export class BackupService implements OnModuleInit, OnModuleDestroy {
 
   private async createAndEnqueue(userId: string, policyId: string | null, destinationAccountId: string): Promise<BackupJob> {
     const job = await this.jobs.save(this.jobs.create({ userId, policyId, snapshotId: null, destinationAccountId, status: 'QUEUED', bytesProcessed: '0', itemsProcessed: 0, errors: [], startedAt: null, completedAt: null }));
+    this.protectionEvents?.emit(userId, 'BACKUP_STARTED', job.id, job.status);
     await this.audit.record(userId, 'BACKUP_CREATED', 'BackupJob', job.id, { policyId, destinationAccountId });
     try { await this.queue.enqueue(job.id); }
     catch (error) { await this.failEnqueue(job, error); throw new BadRequestException('Backup queue is temporarily unavailable'); }
@@ -383,6 +390,7 @@ export class BackupService implements OnModuleInit, OnModuleDestroy {
     job.completedAt = new Date();
     job.errors = [...job.errors, { entryId: '', message: 'BACKUP_QUEUE_UNAVAILABLE' }];
     await this.jobs.save(job);
+    this.protectionEvents?.emit(job.userId, 'BACKUP_FAILED', job.id, job.status);
     await this.audit.record(job.userId, 'BACKUP_FAILED', 'BackupJob', job.id, { reason: this.safeError(error) });
   }
 

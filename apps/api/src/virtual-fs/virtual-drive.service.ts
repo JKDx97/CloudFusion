@@ -3,6 +3,7 @@ import {
   ConflictException,
   Injectable,
   NotFoundException,
+  Optional,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -34,6 +35,7 @@ import { ReplicationQueueService } from './replication-queue.service';
 import { CloudDownload } from '../providers/common/cloud-file.interface';
 import { EncryptionService, DecryptionMetadata } from '../data-protection/encryption.service';
 import { DataProtectionException } from '../data-protection/data-protection-error';
+import { DataProtectionEventsService } from '../realtime/data-protection-events.service';
 
 export interface VirtualNodeResponse {
   id: string;
@@ -81,6 +83,7 @@ export class VirtualDriveService {
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly encryption: EncryptionService,
     @InjectRepository(FileVersion) private readonly fileVersions: Repository<FileVersion>,
+    @Optional() private readonly protectionEvents?: DataProtectionEventsService,
   ) {}
 
   async getRoot(userId: string): Promise<VirtualNodeResponse> {
@@ -249,6 +252,7 @@ export class VirtualDriveService {
     let encrypted: Awaited<ReturnType<EncryptionService['encryptFile']>>;
     try {
       encrypted = await this.encryption.encryptFile(file.path, encryptedPath, storageObjectId);
+      this.protectionEvents?.emit(userId, 'ENCRYPTION_COMPLETED', storageObjectId, 'COMPLETED', { logicalSize: encrypted.logicalSize, encryptedSize: encrypted.encryptedSize });
     } finally {
       await unlink(file.path).catch(() => undefined);
     }
@@ -378,6 +382,7 @@ export class VirtualDriveService {
 
       const { storageObject, node, version } = created;
       const versionInfo = { id: version.id, versionNumber: version.versionNumber, checksum: version.checksum, size: Number(version.size), createdAt: version.createdAt };
+      this.protectionEvents?.emit(userId, 'VERSION_CREATED', version.id, 'CREATED', { nodeId: node.id, versionNumber: version.versionNumber, deduplicated: created.deduplicated });
       if (created.deduplicated) {
         const replicaCount = await this.replicas.count({ where: { storageObjectId: storageObject.id } });
         await this.audit.record(userId, versionNodeId ? 'VIRTUAL_FILE_VERSION_CREATED' : 'VIRTUAL_UPLOAD_DEDUPLICATED', 'VirtualNode', node.id, { storageObjectId: storageObject.id, versionNumber: version.versionNumber });

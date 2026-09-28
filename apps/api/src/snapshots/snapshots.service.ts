@@ -1,4 +1,4 @@
-import { BadRequestException, ConflictException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException, Optional } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
 import { DataSource, In, IsNull, Repository } from 'typeorm';
@@ -15,6 +15,7 @@ import { Snapshot } from './entities/snapshot.entity';
 import { SnapshotEntry } from './entities/snapshot-entry.entity';
 import { SnapshotRestoreJob } from './entities/snapshot-restore-job.entity';
 import { SnapshotRestoreQueueService } from './snapshot-restore-queue.service';
+import { DataProtectionEventsService } from '../realtime/data-protection-events.service';
 
 @Injectable()
 export class SnapshotsService {
@@ -26,6 +27,7 @@ export class SnapshotsService {
     private readonly audit: AuditService,
     @InjectRepository(SnapshotRestoreJob) private readonly restoreJobs: Repository<SnapshotRestoreJob>,
     private readonly restoreQueue: SnapshotRestoreQueueService,
+    @Optional() private readonly protectionEvents?: DataProtectionEventsService,
   ) {}
 
   async create(userId: string, dto: CreateSnapshotDto): Promise<Snapshot> {
@@ -41,6 +43,7 @@ export class SnapshotsService {
       logicalSize: '0',
       completedAt: null,
     }));
+    this.protectionEvents?.emit(userId, 'SNAPSHOT_STARTED', snapshot.id, snapshot.status);
 
     try {
       const completed = await this.dataSource.transaction('REPEATABLE READ', async (manager) => {
@@ -97,10 +100,12 @@ export class SnapshotsService {
         logicalSize: Number(completed.logicalSize),
         isImmutable: completed.isImmutable,
       });
+      this.protectionEvents?.emit(userId, 'SNAPSHOT_COMPLETED', completed.id, completed.status, { nodeCount: completed.nodeCount });
       return completed;
     } catch (error) {
       await this.snapshots.update({ id: snapshot.id, userId }, { status: 'FAILED', completedAt: new Date() });
       await this.audit.record(userId, 'SNAPSHOT_FAILED', 'Snapshot', snapshot.id);
+      this.protectionEvents?.emit(userId, 'SNAPSHOT_FAILED', snapshot.id, 'FAILED');
       throw error;
     }
   }
@@ -326,6 +331,7 @@ export class SnapshotsService {
     }
     await this.restoreQueue.enqueue(job.id);
     await this.audit.record(userId, 'SNAPSHOT_RESTORE_QUEUED', 'SnapshotRestoreJob', job.id, { snapshotId });
+    this.protectionEvents?.emit(userId, 'RESTORE_STARTED', job.id, job.status, { snapshotId, progress: job.totalEntries ? Math.round((job.processedEntries / job.totalEntries) * 100) : 100 });
     return job;
   }
 
@@ -355,6 +361,7 @@ export class SnapshotsService {
       if (entry.isRoot) job.entryMappings[entry.id] = root.id;
     }
     await this.restoreJobs.save(job);
+    this.protectionEvents?.emit(job.userId, 'RESTORE_STARTED', job.id, job.status, { snapshotId: job.snapshotId, progress: 0 });
 
     for (const entry of entries) {
       if (entry.isRoot || job.entryMappings[entry.id]) continue;
@@ -367,6 +374,9 @@ export class SnapshotsService {
       }
       job.processedEntries += 1;
       await this.restoreJobs.save(job);
+      if (job.processedEntries % 10 === 0 || job.processedEntries === job.totalEntries) {
+        this.protectionEvents?.emit(job.userId, 'RESTORE_PROGRESS', job.id, job.status, { snapshotId: job.snapshotId, progress: job.totalEntries ? Math.round((job.processedEntries / job.totalEntries) * 100) : 100 });
+      }
     }
     job.status = job.errors.length ? 'FAILED' : 'COMPLETED';
     job.completedAt = new Date();
@@ -376,6 +386,7 @@ export class SnapshotsService {
       totalEntries: job.totalEntries,
       errorCount: job.errors.length,
     });
+    this.protectionEvents?.emit(job.userId, job.status === 'COMPLETED' ? 'RESTORE_COMPLETED' : 'RESTORE_FAILED', job.id, job.status, { snapshotId: job.snapshotId, progress: job.status === 'COMPLETED' ? 100 : job.totalEntries ? Math.round((job.processedEntries / job.totalEntries) * 100) : 100 });
   }
 
   async markRestoreJobFailed(jobId: string, error: Error): Promise<void> {
@@ -390,6 +401,7 @@ export class SnapshotsService {
       totalEntries: job.totalEntries,
       errorCount: job.errors.length,
     });
+    this.protectionEvents?.emit(job.userId, 'RESTORE_FAILED', job.id, 'FAILED', { snapshotId: job.snapshotId, progress: job.totalEntries ? Math.round((job.processedEntries / job.totalEntries) * 100) : 0 });
   }
 
   private async requireSnapshot(userId: string, snapshotId: string): Promise<Snapshot> {

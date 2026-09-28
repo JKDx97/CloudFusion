@@ -360,6 +360,9 @@ FileVersion → Snapshot → Backup → Recovery
 | POST | `/backups/:id/restore` | Recuperar un backup verificado |
 | GET | `/protection/overview` y `/protection/alerts` | Métricas y alertas propias |
 | PATCH | `/protection/alerts/:id/resolve` | Marcar alerta revisada |
+| SSE | `/protection/events` | Eventos de cifrado, versiones, snapshots, backups, restauraciones y cambios masivos; flujo autenticado y limitado al usuario |
+
+El centro de protección mantiene consultas periódicas como respaldo y se actualiza de inmediato con SSE. El flujo envía heartbeats cada 25 segundos y no incluye contenido de archivos ni material criptográfico.
 | GET | `/cloud-accounts/:id/impact` | Impacto antes de desconectar una cuenta |
 
 ### Variables de entorno de Fase 5

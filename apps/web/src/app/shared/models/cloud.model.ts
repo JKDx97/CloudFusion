@@ -152,6 +152,18 @@ export interface ProtectionAlertRecord {
   resolvedAt: string | null;
 }
 
+export interface DataProtectionEventRecord {
+  type: 'ENCRYPTION_COMPLETED' | 'VERSION_CREATED' | 'SNAPSHOT_STARTED' | 'SNAPSHOT_COMPLETED' | 'SNAPSHOT_FAILED'
+    | 'BACKUP_STARTED' | 'BACKUP_PROGRESS' | 'BACKUP_COMPLETED' | 'BACKUP_FAILED'
+    | 'RESTORE_STARTED' | 'RESTORE_PROGRESS' | 'RESTORE_COMPLETED' | 'RESTORE_FAILED'
+    | 'MASS_CHANGE_DETECTED' | 'HEARTBEAT';
+  entityId: string | null;
+  status?: string;
+  progress?: number;
+  occurredAt: string;
+  details?: Record<string, string | number | boolean | null>;
+}
+
 export interface ProtectionOverviewRecord {
   encryption: { configured: boolean; algorithm: string; keyVersion: number };
   filesProtected: number;
