@@ -3,7 +3,7 @@ import { Component, DestroyRef, OnInit, inject, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { Router, RouterLink } from '@angular/router';
 import { CloudService } from '../../core/cloud/cloud.service';
-import { VirtualNode } from '../../shared/models/cloud.model';
+import { FileVersionRecord, VirtualNode } from '../../shared/models/cloud.model';
 
 type DriveSection = 'drive' | 'recent' | 'favorites' | 'trash';
 
@@ -25,6 +25,10 @@ export class DriveComponent implements OnInit {
   readonly loading = signal(false);
   readonly notice = signal<string | null>(null);
   readonly error = signal<string | null>(null);
+  readonly versionTarget = signal<VirtualNode | null>(null);
+  readonly versions = signal<FileVersionRecord[]>([]);
+  readonly versionLoading = signal(false);
+  readonly versionComment = signal('');
 
   ngOnInit(): void { this.openDrive(); }
 
@@ -85,6 +89,52 @@ export class DriveComponent implements OnInit {
     this.cloud.uploadVirtual(file, this.currentParent()?.id).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({ next: (result) => { this.announce(result.warning ?? (result.queued ? 'Archivo encolado para replicación.' : 'Archivo creado sin réplica física.')); this.reload(); }, error: () => this.fail('No se pudo iniciar la carga.') });
   }
 
+  openVersions(node: VirtualNode): void {
+    this.versionTarget.set(node);
+    this.versionComment.set('');
+    this.versionLoading.set(true);
+    this.cloud.getFileVersions(node.id).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: (versions) => { this.versions.set(versions); this.versionLoading.set(false); },
+      error: () => { this.versionLoading.set(false); this.fail('No se pudo cargar el historial de versiones.'); },
+    });
+  }
+
+  closeVersions(): void { this.versionTarget.set(null); this.versions.set([]); }
+
+  uploadVersion(event: Event): void {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = '';
+    const target = this.versionTarget();
+    if (!file || !target) return;
+    this.cloud.uploadFileVersion(target.id, file, this.versionComment()).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: (result) => {
+        this.announce(result.queued ? `Versión ${result.version.versionNumber} guardada y encolada.` : `Versión ${result.version.versionNumber} guardada.`);
+        this.openVersions(result.node);
+        this.reload();
+      },
+      error: () => this.fail('No se pudo guardar la nueva versión.'),
+    });
+  }
+
+  downloadVersion(version: FileVersionRecord): void {
+    const target = this.versionTarget();
+    if (!target) return;
+    this.cloud.downloadFileVersion(target.id, version.id).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: (blob) => this.saveDownload(blob, `${target.name}.v${version.versionNumber}`),
+      error: () => this.fail('No se pudo descargar esa versión.'),
+    });
+  }
+
+  restoreVersion(version: FileVersionRecord): void {
+    const target = this.versionTarget();
+    if (!target || version.current || !window.confirm(`¿Restaurar la versión ${version.versionNumber}? Se guardará como una versión nueva.`)) return;
+    this.cloud.restoreFileVersion(target.id, version.id).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: (node) => { this.announce(`La versión ${version.versionNumber} se restauró como una nueva versión.`); this.openVersions(node); this.reload(); },
+      error: () => this.fail('No se pudo restaurar la versión.'),
+    });
+  }
+
   rename(node: VirtualNode): void {
     const name = window.prompt('Nuevo nombre', node.name);
     if (!name?.trim() || name.trim() === node.name) return;
@@ -115,9 +165,18 @@ export class DriveComponent implements OnInit {
 
   download(node: VirtualNode): void {
     this.cloud.downloadVirtual(node.id).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
-      next: (blob) => { const url = URL.createObjectURL(blob); const anchor = document.createElement('a'); anchor.href = url; anchor.download = node.name; anchor.click(); URL.revokeObjectURL(url); },
+      next: (blob) => this.saveDownload(blob, node.name),
       error: () => this.fail('No hay una réplica disponible para descargar.'),
     });
+  }
+
+  private saveDownload(blob: Blob, fileName: string): void {
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = fileName;
+    anchor.click();
+    URL.revokeObjectURL(url);
   }
 
   formatBytes(value: number | null): string {

@@ -4,7 +4,7 @@ import { Observable, map } from 'rxjs';
 import { AuthService } from '../auth/auth.service';
 import { environment } from '../../../environments/environment';
 import { ApiResponse } from '../../shared/models/api-response.model';
-import { CloudAccount, CloudFile, CloudProvider, CloudSearchResponse, CloudStorageSummary, StorageRule, TransferJob, TransferProgressEvent, TransferOperation, VirtualNode } from '../../shared/models/cloud.model';
+import { CloudAccount, CloudFile, CloudProvider, CloudSearchResponse, CloudStorageSummary, FileVersionRecord, SnapshotEntryRecord, SnapshotRecord, SnapshotRestoreJobRecord, StorageRule, TransferJob, TransferProgressEvent, TransferOperation, VirtualNode } from '../../shared/models/cloud.model';
 
 @Injectable({ providedIn: 'root' })
 export class CloudService {
@@ -195,6 +195,53 @@ export class CloudService {
 
   downloadVirtual(id: string): Observable<Blob> {
     return this.http.get(`${this.apiUrl}/virtual-drive/nodes/${id}/download`, { responseType: 'blob' });
+  }
+
+  getFileVersions(id: string): Observable<FileVersionRecord[]> {
+    return this.http.get<ApiResponse<FileVersionRecord[]>>(`${this.apiUrl}/virtual-drive/nodes/${id}/versions`).pipe(map((response) => response.data));
+  }
+
+  uploadFileVersion(id: string, file: File, comment?: string): Observable<{ node: VirtualNode; version: FileVersionRecord; queued: boolean; replicas: number }> {
+    const form = new FormData();
+    form.append('file', file, file.name);
+    if (comment?.trim()) form.append('comment', comment.trim());
+    return this.http.post<ApiResponse<{ node: VirtualNode; version: FileVersionRecord; queued: boolean; replicas: number }>>(`${this.apiUrl}/virtual-drive/nodes/${id}/versions`, form).pipe(map((response) => response.data));
+  }
+
+  restoreFileVersion(id: string, versionId: string): Observable<VirtualNode> {
+    return this.http.post<ApiResponse<VirtualNode>>(`${this.apiUrl}/virtual-drive/nodes/${id}/versions/${versionId}/restore`, {}).pipe(map((response) => response.data));
+  }
+
+  downloadFileVersion(id: string, versionId: string): Observable<Blob> {
+    return this.http.get(`${this.apiUrl}/virtual-drive/nodes/${id}/versions/${versionId}/download`, { responseType: 'blob' });
+  }
+
+  listSnapshots(): Observable<SnapshotRecord[]> {
+    return this.http.get<ApiResponse<SnapshotRecord[]>>(`${this.apiUrl}/snapshots`).pipe(map((response) => response.data));
+  }
+
+  createSnapshot(name: string, description?: string, isImmutable = false): Observable<SnapshotRecord> {
+    return this.http.post<ApiResponse<SnapshotRecord>>(`${this.apiUrl}/snapshots`, { name, description, isImmutable }).pipe(map((response) => response.data));
+  }
+
+  getSnapshotEntries(id: string): Observable<SnapshotEntryRecord[]> {
+    return this.http.get<ApiResponse<SnapshotEntryRecord[]>>(`${this.apiUrl}/snapshots/${id}/entries`).pipe(map((response) => response.data));
+  }
+
+  restoreSnapshotEntry(snapshotId: string, entryId: string, strategy: 'RESTORE_RENAME' | 'RESTORE_OVERWRITE' | 'RESTORE_SKIP' = 'RESTORE_RENAME', targetParentId?: string): Observable<{ status: 'RESTORED' | 'SKIPPED'; nodeId?: string; name?: string }> {
+    return this.http.post<ApiResponse<{ status: 'RESTORED' | 'SKIPPED'; nodeId?: string; name?: string }>>(`${this.apiUrl}/snapshots/${snapshotId}/entries/${entryId}/restore`, { strategy, targetParentId }).pipe(map((response) => response.data));
+  }
+
+  restoreSnapshot(id: string): Observable<SnapshotRestoreJobRecord> {
+    return this.http.post<ApiResponse<SnapshotRestoreJobRecord>>(`${this.apiUrl}/snapshots/${id}/restore`, {}).pipe(map((response) => response.data));
+  }
+
+  listSnapshotRestoreJobs(): Observable<SnapshotRestoreJobRecord[]> {
+    return this.http.get<ApiResponse<SnapshotRestoreJobRecord[]>>(`${this.apiUrl}/snapshots/restore-jobs`).pipe(map((response) => response.data));
+  }
+
+  deleteSnapshot(id: string): Observable<{ deleted: true }> {
+    return this.http.delete<ApiResponse<{ deleted: true }>>(`${this.apiUrl}/snapshots/${id}`).pipe(map((response) => response.data));
   }
 
   rebalanceVirtual(): Observable<{ queued: number; skipped: number }> {
