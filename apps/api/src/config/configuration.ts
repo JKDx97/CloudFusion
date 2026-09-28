@@ -70,6 +70,7 @@ export default () => ({
   dataProtection: {
     masterKey: process.env.CLOUDFUSION_MASTER_KEY,
     keyVersion: Number(process.env.CLOUDFUSION_KEY_VERSION ?? 1),
+    masterKeysJson: process.env.CLOUDFUSION_MASTER_KEYS_JSON,
     retentionMode: process.env.DEFAULT_VERSION_RETENTION_MODE ?? 'KEEP_LAST_N',
     retentionCount: Number(process.env.DEFAULT_VERSION_RETENTION_COUNT ?? 10),
     snapshotSchedulerEnabled: process.env.SNAPSHOT_SCHEDULER_ENABLED !== 'false',
