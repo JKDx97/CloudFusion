@@ -13,6 +13,8 @@ import { CreateSnapshotDto } from './dto/create-snapshot.dto';
 import { SnapshotRestoreStrategy } from './dto/restore-snapshot-entry.dto';
 import { Snapshot } from './entities/snapshot.entity';
 import { SnapshotEntry } from './entities/snapshot-entry.entity';
+import { SnapshotRestoreJob } from './entities/snapshot-restore-job.entity';
+import { SnapshotRestoreQueueService } from './snapshot-restore-queue.service';
 
 @Injectable()
 export class SnapshotsService {
@@ -22,6 +24,8 @@ export class SnapshotsService {
     @InjectRepository(VirtualNode) private readonly nodes: Repository<VirtualNode>,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly audit: AuditService,
+    @InjectRepository(SnapshotRestoreJob) private readonly restoreJobs: Repository<SnapshotRestoreJob>,
+    private readonly restoreQueue: SnapshotRestoreQueueService,
   ) {}
 
   async create(userId: string, dto: CreateSnapshotDto): Promise<Snapshot> {
@@ -147,6 +151,7 @@ export class SnapshotsService {
     entryId: string,
     strategy: SnapshotRestoreStrategy = 'RESTORE_RENAME',
     targetParentId?: string,
+    restoreJobId?: string,
   ): Promise<{ status: 'RESTORED' | 'SKIPPED'; nodeId?: string; name?: string }> {
     const snapshot = await this.requireSnapshot(userId, snapshotId);
     if (snapshot.status !== 'AVAILABLE') throw new BadRequestException('Only completed snapshots can be restored');
@@ -171,6 +176,21 @@ export class SnapshotsService {
       const nodeRepository = manager.getRepository(VirtualNode);
       const versionRepository = manager.getRepository(FileVersion);
       const objectRepository = manager.getRepository(StorageObject);
+      const restoreJobRepository = manager.getRepository(SnapshotRestoreJob);
+      const restoreJob = restoreJobId
+        ? await restoreJobRepository.createQueryBuilder('restoreJob')
+          .setLock('pessimistic_write')
+          .where('restoreJob.id = :restoreJobId AND restoreJob.userId = :userId AND restoreJob.snapshotId = :snapshotId', { restoreJobId, userId, snapshotId })
+          .getOne()
+        : null;
+      if (restoreJobId && !restoreJob) throw new NotFoundException('Snapshot restore job not found');
+      const existingMapping = restoreJob?.entryMappings?.[entry.id];
+      if (existingMapping) return { status: 'RESTORED' as const, nodeId: existingMapping, name: entry.name };
+      const recordJobMapping = async (nodeId: string) => {
+        if (!restoreJob) return;
+        restoreJob.entryMappings = { ...(restoreJob.entryMappings ?? {}), [entry.id]: nodeId };
+        await restoreJobRepository.save(restoreJob);
+      };
       let name = originalName;
       let conflict: VirtualNode | null = null;
       for (let suffix = 0; suffix < 1000; suffix += 1) {
@@ -185,6 +205,7 @@ export class SnapshotsService {
         throw new BadRequestException('Cannot overwrite a node of a different type');
       }
       if (conflict && strategy === 'RESTORE_OVERWRITE' && entry.type === 'FOLDER') {
+        await recordJobMapping(conflict.id);
         return { status: 'RESTORED' as const, nodeId: conflict.id, name: conflict.name };
       }
 
@@ -206,6 +227,7 @@ export class SnapshotsService {
           isFavorite: false,
           lastAccessedAt: null,
         }));
+        await recordJobMapping(folder.id);
         return { status: 'RESTORED' as const, nodeId: folder.id, name: folder.name };
       }
 
@@ -268,6 +290,7 @@ export class SnapshotsService {
       targetNode.mimeType = entry.mimeType ?? object.mimeType;
       targetNode.status = object.status as unknown as VirtualNodeStatus;
       const savedNode = await nodeRepository.save(targetNode);
+      await recordJobMapping(savedNode.id);
       return { status: 'RESTORED' as const, nodeId: savedNode.id, name: savedNode.name };
     });
     if (restored.status === 'RESTORED') {
@@ -278,6 +301,95 @@ export class SnapshotsService {
       });
     }
     return restored;
+  }
+
+  async queueSnapshotRestore(userId: string, snapshotId: string): Promise<SnapshotRestoreJob> {
+    const snapshot = await this.requireSnapshot(userId, snapshotId);
+    if (snapshot.status !== 'AVAILABLE') throw new BadRequestException('Only completed snapshots can be restored');
+    let job = await this.restoreJobs.findOne({
+      where: { userId, snapshotId, status: In(['QUEUED', 'RUNNING']) },
+      order: { createdAt: 'DESC' },
+    });
+    if (!job) {
+      const totalEntries = await this.entries.count({ where: { snapshotId } });
+      job = await this.restoreJobs.save(this.restoreJobs.create({
+        userId,
+        snapshotId,
+        status: 'QUEUED',
+        totalEntries,
+        processedEntries: 0,
+        entryMappings: {},
+        errors: [],
+        startedAt: null,
+        completedAt: null,
+      }));
+    }
+    await this.restoreQueue.enqueue(job.id);
+    await this.audit.record(userId, 'SNAPSHOT_RESTORE_QUEUED', 'SnapshotRestoreJob', job.id, { snapshotId });
+    return job;
+  }
+
+  async getRestoreJob(userId: string, jobId: string): Promise<SnapshotRestoreJob> {
+    const job = await this.restoreJobs.findOne({ where: { id: jobId, userId } });
+    if (!job) throw new NotFoundException('Snapshot restore job not found');
+    return job;
+  }
+
+  async listRestoreJobs(userId: string): Promise<SnapshotRestoreJob[]> {
+    return this.restoreJobs.find({ where: { userId }, order: { createdAt: 'DESC' }, take: 100 });
+  }
+
+  async processRestoreJob(jobId: string): Promise<void> {
+    const job = await this.restoreJobs.findOne({ where: { id: jobId } });
+    if (!job || job.status === 'COMPLETED' || job.status === 'CANCELLED') return;
+    const snapshot = await this.requireSnapshot(job.userId, job.snapshotId);
+    const entries = this.topologicalEntries(await this.entries.find({ where: { snapshotId: snapshot.id } }));
+    job.status = 'RUNNING';
+    job.startedAt ??= new Date();
+    job.totalEntries = entries.length;
+    job.entryMappings ??= {};
+    job.errors ??= [];
+    const root = await this.nodes.findOne({ where: { userId: job.userId, isRoot: true, deletedAt: IsNull() } });
+    if (!root) throw new NotFoundException('Virtual drive root not found');
+    for (const entry of entries) {
+      if (entry.isRoot) job.entryMappings[entry.id] = root.id;
+    }
+    await this.restoreJobs.save(job);
+
+    for (const entry of entries) {
+      if (entry.isRoot || job.entryMappings[entry.id]) continue;
+      const parentId = entry.parentSnapshotEntryId ? job.entryMappings[entry.parentSnapshotEntryId] : root.id;
+      try {
+        const result = await this.restoreEntry(job.userId, snapshot.id, entry.id, 'RESTORE_RENAME', parentId ?? root.id, job.id);
+        if (result.status === 'RESTORED' && result.nodeId) job.entryMappings[entry.id] = result.nodeId;
+      } catch (error) {
+        job.errors.push({ entryId: entry.id, message: error instanceof Error ? error.message : 'Entry restore failed' });
+      }
+      job.processedEntries += 1;
+      await this.restoreJobs.save(job);
+    }
+    job.status = job.errors.length ? 'FAILED' : 'COMPLETED';
+    job.completedAt = new Date();
+    await this.restoreJobs.save(job);
+    await this.audit.record(job.userId, job.status === 'COMPLETED' ? 'SNAPSHOT_RESTORE_COMPLETED' : 'SNAPSHOT_RESTORE_FAILED', 'SnapshotRestoreJob', job.id, {
+      processedEntries: job.processedEntries,
+      totalEntries: job.totalEntries,
+      errorCount: job.errors.length,
+    });
+  }
+
+  async markRestoreJobFailed(jobId: string, error: Error): Promise<void> {
+    const job = await this.restoreJobs.findOne({ where: { id: jobId } });
+    if (!job || job.status === 'COMPLETED' || job.status === 'FAILED' || job.status === 'CANCELLED') return;
+    job.status = 'FAILED';
+    job.completedAt = new Date();
+    job.errors = [...(job.errors ?? []), { entryId: '*', message: error.message.slice(0, 500) }];
+    await this.restoreJobs.save(job);
+    await this.audit.record(job.userId, 'SNAPSHOT_RESTORE_FAILED', 'SnapshotRestoreJob', job.id, {
+      processedEntries: job.processedEntries,
+      totalEntries: job.totalEntries,
+      errorCount: job.errors.length,
+    });
   }
 
   private async requireSnapshot(userId: string, snapshotId: string): Promise<Snapshot> {
@@ -323,5 +435,28 @@ export class SnapshotsService {
     const base = hasExtension ? originalName.slice(0, extensionIndex) : originalName;
     const extension = hasExtension ? originalName.slice(extensionIndex) : '';
     return `${base} (restored${suffix > 1 ? ` ${suffix}` : ''})${extension}`;
+  }
+
+  private topologicalEntries(entries: SnapshotEntry[]): SnapshotEntry[] {
+    const entryIds = new Set(entries.map((entry) => entry.id));
+    const children = new Map<string, SnapshotEntry[]>();
+    for (const entry of entries) {
+      const parentId = entry.parentSnapshotEntryId ?? '';
+      const group = children.get(parentId) ?? [];
+      group.push(entry);
+      children.set(parentId, group);
+    }
+    const queue = entries.filter((entry) => !entry.parentSnapshotEntryId || !entryIds.has(entry.parentSnapshotEntryId));
+    const ordered: SnapshotEntry[] = [];
+    const seen = new Set<string>();
+    for (let index = 0; index < queue.length; index += 1) {
+      const entry = queue[index];
+      if (seen.has(entry.id)) continue;
+      seen.add(entry.id);
+      ordered.push(entry);
+      queue.push(...(children.get(entry.id) ?? []));
+    }
+    for (const entry of entries) if (!seen.has(entry.id)) ordered.push(entry);
+    return ordered;
   }
 }

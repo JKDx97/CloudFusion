@@ -42,6 +42,24 @@ export class SnapshotsController {
     return this.snapshots.restoreEntry(request.user.sub, id, entryId, dto.strategy, dto.targetParentId);
   }
 
+  @Post(':id/restore')
+  @ApiOperation({ summary: 'Queue a full snapshot restore as a background job' })
+  restoreSnapshot(@Req() request: AuthenticatedRequest, @Param('id') id: string) {
+    return this.snapshots.queueSnapshotRestore(request.user.sub, id);
+  }
+
+  @Get('restore-jobs')
+  @ApiOperation({ summary: 'List the authenticated user’s full snapshot restore jobs' })
+  restoreJobs(@Req() request: AuthenticatedRequest) {
+    return this.snapshots.listRestoreJobs(request.user.sub);
+  }
+
+  @Get('restore-jobs/:jobId')
+  @ApiOperation({ summary: 'Get progress and errors for an owned snapshot restore job' })
+  restoreJob(@Req() request: AuthenticatedRequest, @Param('jobId') jobId: string) {
+    return this.snapshots.getRestoreJob(request.user.sub, jobId);
+  }
+
   @Delete(':id')
   @ApiOperation({ summary: 'Delete an owned snapshot unless it is marked immutable' })
   delete(@Req() request: AuthenticatedRequest, @Param('id') id: string) {

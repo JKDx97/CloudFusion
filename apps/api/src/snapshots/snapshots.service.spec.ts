@@ -1,6 +1,7 @@
 import { SnapshotsService } from './snapshots.service';
 import { Snapshot } from './entities/snapshot.entity';
 import { SnapshotEntry } from './entities/snapshot-entry.entity';
+import { SnapshotRestoreJob } from './entities/snapshot-restore-job.entity';
 import { VirtualNode } from '../virtual-fs/entities/virtual-node.entity';
 import { FileVersion } from '../virtual-fs/entities/file-version.entity';
 import { VirtualNodeStatus } from '../virtual-fs/enums/virtual-node-status.enum';
@@ -47,7 +48,9 @@ describe('SnapshotsService', () => {
               : { findOne: jest.fn().mockResolvedValue(snapshotRow), save: jest.fn(async (value: Snapshot) => value) },
       })),
     };
-    const service = new SnapshotsService(snapshotsRepository as never, snapshotEntriesRepository as never, nodesRepository as never, dataSource as never, audit as never);
+    const restoreJobs = { findOne: jest.fn(), find: jest.fn(), create: jest.fn(), save: jest.fn() };
+    const restoreQueue = { enqueue: jest.fn().mockResolvedValue(undefined) };
+    const service = new SnapshotsService(snapshotsRepository as never, snapshotEntriesRepository as never, nodesRepository as never, dataSource as never, audit as never, restoreJobs as never, restoreQueue as never);
 
     const snapshot = await service.create('user-1', { name: 'Pre cambios', isImmutable: true });
 
@@ -84,12 +87,64 @@ describe('SnapshotsService', () => {
       })),
     };
     const audit = { record: jest.fn().mockResolvedValue(undefined) };
-    const service = new SnapshotsService(snapshotsRepository as never, entriesRepository as never, nodesRepository as never, dataSource as never, audit as never);
+    const restoreJobs = { findOne: jest.fn(), find: jest.fn(), create: jest.fn(), save: jest.fn() };
+    const restoreQueue = { enqueue: jest.fn().mockResolvedValue(undefined) };
+    const service = new SnapshotsService(snapshotsRepository as never, entriesRepository as never, nodesRepository as never, dataSource as never, audit as never, restoreJobs as never, restoreQueue as never);
 
     const result = await service.restoreEntry('user-1', 'snapshot-1', 'entry-1');
 
     expect(result).toMatchObject({ status: 'RESTORED', nodeId: 'restored-folder', name: 'Universidad (restored)' });
     expect(nodeRepository.create).toHaveBeenCalledWith(expect.objectContaining({ parentId: 'drive-root', name: 'Universidad (restored)', type: VirtualNodeType.FOLDER }));
     expect(audit.record).toHaveBeenCalledWith('user-1', 'SNAPSHOT_ENTRY_RESTORED', 'SnapshotEntry', 'entry-1', expect.objectContaining({ strategy: 'RESTORE_RENAME' }));
+  });
+
+  it('queues full snapshot restoration as an idempotent background job', async () => {
+    const snapshot = { id: 'snapshot-1', userId: 'user-1', status: 'AVAILABLE' } as Snapshot;
+    const savedJob = { id: 'restore-job-1', userId: 'user-1', snapshotId: 'snapshot-1', status: 'QUEUED', totalEntries: 3 };
+    const snapshotsRepository = { findOne: jest.fn().mockResolvedValue(snapshot) };
+    const entriesRepository = { count: jest.fn().mockResolvedValue(3) };
+    const jobsRepository = {
+      findOne: jest.fn().mockResolvedValue(null),
+      create: jest.fn((value: Partial<SnapshotRestoreJob>) => value),
+      save: jest.fn(async (value: Partial<SnapshotRestoreJob>) => ({ ...value, id: savedJob.id })),
+    };
+    const queue = { enqueue: jest.fn().mockResolvedValue(undefined) };
+    const audit = { record: jest.fn().mockResolvedValue(undefined) };
+    const service = new SnapshotsService(snapshotsRepository as never, entriesRepository as never, {} as never, {} as never, audit as never, jobsRepository as never, queue as never);
+
+    const job = await service.queueSnapshotRestore('user-1', 'snapshot-1');
+
+    expect(job).toMatchObject({ id: 'restore-job-1', status: 'QUEUED', totalEntries: 3 });
+    expect(queue.enqueue).toHaveBeenCalledWith('restore-job-1');
+    expect(audit.record).toHaveBeenCalledWith('user-1', 'SNAPSHOT_RESTORE_QUEUED', 'SnapshotRestoreJob', 'restore-job-1', { snapshotId: 'snapshot-1' });
+  });
+
+  it('processes a full restore in parent-first order and persists progress', async () => {
+    const snapshot = { id: 'snapshot-1', userId: 'user-1', status: 'AVAILABLE', name: 'Previo' } as Snapshot;
+    const rootEntry = { id: 'root-entry', isRoot: true, parentSnapshotEntryId: null } as SnapshotEntry;
+    const folderEntry = { id: 'folder-entry', isRoot: false, parentSnapshotEntryId: 'root-entry' } as SnapshotEntry;
+    const job = {
+      id: 'restore-job-1', userId: 'user-1', snapshotId: 'snapshot-1', status: 'QUEUED',
+      totalEntries: 2, processedEntries: 0, entryMappings: {}, errors: [], startedAt: null, completedAt: null,
+    } as SnapshotRestoreJob;
+    const snapshotsRepository = { findOne: jest.fn().mockResolvedValue(snapshot) };
+    const entriesRepository = { find: jest.fn().mockResolvedValue([folderEntry, rootEntry]) };
+    const nodesRepository = { findOne: jest.fn().mockResolvedValue({ id: 'drive-root', userId: 'user-1', isRoot: true }) };
+    const jobsRepository = {
+      findOne: jest.fn().mockResolvedValue(job),
+      save: jest.fn(async (value: SnapshotRestoreJob) => value),
+    };
+    const audit = { record: jest.fn().mockResolvedValue(undefined) };
+    const service = new SnapshotsService(
+      snapshotsRepository as never, entriesRepository as never, nodesRepository as never, {} as never,
+      audit as never, jobsRepository as never, {} as never,
+    );
+    const restoreEntry = jest.spyOn(service, 'restoreEntry').mockResolvedValue({ status: 'RESTORED', nodeId: 'restored-folder', name: 'Universidad' });
+
+    await service.processRestoreJob(job.id);
+
+    expect(restoreEntry).toHaveBeenCalledWith('user-1', 'snapshot-1', 'folder-entry', 'RESTORE_RENAME', 'drive-root', job.id);
+    expect(job).toMatchObject({ status: 'COMPLETED', processedEntries: 1, entryMappings: { 'root-entry': 'drive-root', 'folder-entry': 'restored-folder' } });
+    expect(audit.record).toHaveBeenCalledWith('user-1', 'SNAPSHOT_RESTORE_COMPLETED', 'SnapshotRestoreJob', job.id, expect.objectContaining({ errorCount: 0 }));
   });
 });

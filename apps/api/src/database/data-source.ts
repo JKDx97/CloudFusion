@@ -12,6 +12,7 @@ import { StoragePolicy } from '../virtual-fs/entities/storage-policy.entity';
 import { FileVersion } from '../virtual-fs/entities/file-version.entity';
 import { Snapshot } from '../snapshots/entities/snapshot.entity';
 import { SnapshotEntry } from '../snapshots/entities/snapshot-entry.entity';
+import { SnapshotRestoreJob } from '../snapshots/entities/snapshot-restore-job.entity';
 
 export default new DataSource({
   type: 'postgres',
@@ -20,7 +21,7 @@ export default new DataSource({
   username: process.env.DATABASE_USER ?? 'cloudfusion',
   password: process.env.DATABASE_PASSWORD ?? 'change_me_local',
   database: process.env.DATABASE_NAME ?? 'cloudfusion',
-  entities: [User, CloudAccount, TransferJob, StorageRule, AuditLog, VirtualNode, StorageObject, StorageReplica, StoragePolicy, FileVersion, Snapshot, SnapshotEntry],
+  entities: [User, CloudAccount, TransferJob, StorageRule, AuditLog, VirtualNode, StorageObject, StorageReplica, StoragePolicy, FileVersion, Snapshot, SnapshotEntry, SnapshotRestoreJob],
   migrations: [__dirname + '/migrations/*{.ts,.js}'],
   synchronize: false,
 });
