@@ -11,9 +11,12 @@ import { AuditService } from '../audit/audit.service';
 import { CloudAccountService } from '../cloud-accounts/cloud-account.service';
 import { StorageObject } from './entities/storage-object.entity';
 import { StorageReplica } from './entities/storage-replica.entity';
+import { StoragePolicy } from './entities/storage-policy.entity';
 import { StorageReplicaStatus } from './enums/storage-replica-status.enum';
 import { ReplicationQueueService } from './replication-queue.service';
 import { pipeline } from 'node:stream/promises';
+import { CloudAccountStatus } from '../providers/common/cloud-provider.enum';
+import { StorageObjectStatus } from './enums/storage-object-status.enum';
 
 @Injectable()
 export class ReplicaHealthService implements OnModuleInit, OnModuleDestroy {
@@ -23,6 +26,7 @@ export class ReplicaHealthService implements OnModuleInit, OnModuleDestroy {
   constructor(
     @InjectRepository(StorageObject) private readonly objects: Repository<StorageObject>,
     @InjectRepository(StorageReplica) private readonly replicas: Repository<StorageReplica>,
+    @InjectRepository(StoragePolicy) private readonly policies: Repository<StoragePolicy>,
     private readonly accounts: CloudAccountService,
     private readonly queue: ReplicationQueueService,
     private readonly audit: AuditService,
@@ -56,6 +60,57 @@ export class ReplicaHealthService implements OnModuleInit, OnModuleDestroy {
         if (object) await this.verifyReplica(replica, object).catch((error) => this.logger.warn(`Replica verification failed: ${String(error)}`));
       }
     }
+  }
+
+  async rebalance(userId: string): Promise<{ queued: number; skipped: number }> {
+    const objects = await this.objects.find({ where: { userId, status: StorageObjectStatus.DEGRADED } });
+    const accounts = (await this.accounts.list(userId)).filter((account) => account.status === CloudAccountStatus.CONNECTED);
+    let queued = 0;
+    let skipped = 0;
+    for (const object of objects) {
+      const policy = object.policyId ? await this.policies.findOne({ where: { id: object.policyId } }) : null;
+      const required = policy?.replicationFactor ?? 1;
+      const existing = await this.replicas.find({ where: { storageObjectId: object.id } });
+      const healthy = existing.filter((replica) => replica.status === StorageReplicaStatus.HEALTHY).length;
+      const needed = Math.max(0, required - healthy);
+      if (needed === 0) continue;
+      const source = existing.find((replica) => replica.status === StorageReplicaStatus.HEALTHY && replica.remoteFileId);
+      if (!source?.remoteFileId) {
+        skipped += 1;
+        continue;
+      }
+      const candidates = accounts.filter((account) => !existing.some((replica) => replica.cloudAccountId === account.id) && (required === 1 || !existing.some((replica) => replica.provider === account.provider)));
+      for (const account of candidates.slice(0, needed)) {
+        try {
+          const sourceContext = await this.accounts.getAuthorizedAccount(userId, source.cloudAccountId);
+          const download = await sourceContext.adapter.downloadFile(sourceContext.accessToken, sourceContext.account.id, source.remoteFileId);
+          const directory = join(tmpdir(), 'cloudfusion-repairs');
+          await mkdir(directory, { recursive: true });
+          const stagingPath = join(directory, `${object.id}-rebalance-${account.id}-${Date.now()}`);
+          await pipeline(download.stream, createWriteStream(stagingPath));
+          const target = await this.replicas.save(this.replicas.create({
+            storageObjectId: object.id,
+            cloudAccountId: account.id,
+            provider: account.provider,
+            remoteFileId: null,
+            remoteParentId: null,
+            status: StorageReplicaStatus.REPAIRING,
+            size: object.size,
+            checksum: object.checksum,
+            lastVerifiedAt: null,
+            lastError: null,
+            attempts: 0,
+          }));
+          await this.queue.enqueue({ replicaId: target.id, stagingPath });
+          queued += 1;
+          await this.audit.record(userId, 'STORAGE_REBALANCE_QUEUED', 'StorageObject', object.id, { targetAccountId: account.id, replicaId: target.id });
+        } catch (error) {
+          skipped += 1;
+          this.logger.warn(`Could not rebalance storage object ${object.id}: ${String(error)}`);
+        }
+      }
+    }
+    return { queued, skipped };
   }
 
   private async verifyReplica(replica: StorageReplica, object: StorageObject): Promise<void> {

@@ -296,12 +296,60 @@ export class VirtualDriveService {
     return nodes.map((node) => this.toResponse(node));
   }
 
+  async trashList(userId: string): Promise<VirtualNodeResponse[]> {
+    const nodes = await this.nodes.find({ where: { userId }, order: { deletedAt: 'DESC', name: 'ASC' } });
+    return nodes.filter((node) => Boolean(node.deletedAt)).map((node) => this.toResponse(node));
+  }
+
   async setFavorite(userId: string, id: string, favorite: boolean): Promise<VirtualNodeResponse> {
     const node = await this.findOwned(id, userId);
     node.isFavorite = favorite;
     const saved = await this.nodes.save(node);
     await this.audit.record(userId, favorite ? 'VIRTUAL_NODE_FAVORITED' : 'VIRTUAL_NODE_UNFAVORITED', 'VirtualNode', id);
     return this.toResponse(saved);
+  }
+
+  async storageOverview(userId: string): Promise<{
+    logicalBytes: number;
+    physicalBytes: number;
+    logicalFiles: number;
+    replicas: number;
+    healthyReplicas: number;
+    degradedObjects: number;
+  }> {
+    const objects = await this.objects.find({ where: { userId } });
+    const objectIds = objects.map((object) => object.id);
+    const replicas = objectIds.length ? await this.replicas.find({ where: objectIds.map((storageObjectId) => ({ storageObjectId })) }) : [];
+    return {
+      logicalBytes: objects.reduce((sum, object) => sum + Number(object.size), 0),
+      physicalBytes: replicas.filter((replica) => Boolean(replica.remoteFileId)).reduce((sum, replica) => sum + Number(replica.size ?? 0), 0),
+      logicalFiles: objects.length,
+      replicas: replicas.length,
+      healthyReplicas: replicas.filter((replica) => replica.status === StorageReplicaStatus.HEALTHY).length,
+      degradedObjects: objects.filter((object) => object.status !== StorageObjectStatus.AVAILABLE).length,
+    };
+  }
+
+  async accountImpact(userId: string, accountId: string): Promise<{
+    accountId: string;
+    provider: string;
+    status: string;
+    affectedFiles: number;
+    healthyReplicas: number;
+    warning: string;
+  }> {
+    const account = await this.accounts.getOwnedAccount(userId, accountId);
+    const replicas = await this.replicas.find({ where: { cloudAccountId: accountId } });
+    const affected = new Set(replicas.map((replica) => replica.storageObjectId));
+    const healthy = replicas.filter((replica) => replica.status === StorageReplicaStatus.HEALTHY).length;
+    return {
+      accountId,
+      provider: account.provider,
+      status: account.status,
+      affectedFiles: affected.size,
+      healthyReplicas: healthy,
+      warning: affected.size === 0 ? 'Esta cuenta no tiene réplicas de CloudFusion.' : healthy === replicas.length ? 'Desconectar puede dejar archivos sin acceso físico hasta completar un rebalanceo.' : 'Hay réplicas ya degradadas en esta cuenta; realiza un rebalanceo antes de desconectarla.',
+    };
   }
 
   private async ensureRoot(userId: string): Promise<VirtualNode> {

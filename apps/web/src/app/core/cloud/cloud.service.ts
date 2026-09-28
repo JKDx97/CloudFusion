@@ -4,7 +4,7 @@ import { Observable, map } from 'rxjs';
 import { AuthService } from '../auth/auth.service';
 import { environment } from '../../../environments/environment';
 import { ApiResponse } from '../../shared/models/api-response.model';
-import { CloudAccount, CloudFile, CloudProvider, CloudSearchResponse, CloudStorageSummary, StorageRule, TransferJob, TransferProgressEvent, TransferOperation } from '../../shared/models/cloud.model';
+import { CloudAccount, CloudFile, CloudProvider, CloudSearchResponse, CloudStorageSummary, StorageRule, TransferJob, TransferProgressEvent, TransferOperation, VirtualNode } from '../../shared/models/cloud.model';
 
 @Injectable({ providedIn: 'root' })
 export class CloudService {
@@ -139,5 +139,65 @@ export class CloudService {
     form.append('file', file, file.name);
     if (parentId) form.append('parentId', parentId);
     return this.http.post<ApiResponse<{ file: CloudFile; destination: { accountId: string; provider: string; folderId: string | null; ruleId: string | null } }>>(`${this.apiUrl}/cloud-files/smart-upload`, form).pipe(map((response) => response.data));
+  }
+
+  getVirtualRoot(): Observable<VirtualNode> {
+    return this.http.get<ApiResponse<VirtualNode>>(`${this.apiUrl}/virtual-drive/root`).pipe(map((response) => response.data));
+  }
+
+  getVirtualChildren(parentId: string): Observable<VirtualNode[]> {
+    return this.http.get<ApiResponse<VirtualNode[]>>(`${this.apiUrl}/virtual-drive/nodes/${parentId}/children`).pipe(map((response) => response.data));
+  }
+
+  createVirtualFolder(name: string, parentId?: string): Observable<VirtualNode> {
+    return this.http.post<ApiResponse<VirtualNode>>(`${this.apiUrl}/virtual-drive/folders`, { name, parentId }).pipe(map((response) => response.data));
+  }
+
+  uploadVirtual(file: File, parentId?: string): Observable<{ node: VirtualNode; queued: boolean; replicas: number; warning?: string }> {
+    const form = new FormData();
+    form.append('file', file, file.name);
+    if (parentId) form.append('parentId', parentId);
+    return this.http.post<ApiResponse<{ node: VirtualNode; queued: boolean; replicas: number; warning?: string }>>(`${this.apiUrl}/virtual-drive/upload`, form).pipe(map((response) => response.data));
+  }
+
+  renameVirtual(id: string, name: string): Observable<VirtualNode> {
+    return this.http.patch<ApiResponse<VirtualNode>>(`${this.apiUrl}/virtual-drive/nodes/${id}`, { name }).pipe(map((response) => response.data));
+  }
+
+  trashVirtual(id: string): Observable<{ deleted: true }> {
+    return this.http.delete<ApiResponse<{ deleted: true }>>(`${this.apiUrl}/virtual-drive/nodes/${id}`).pipe(map((response) => response.data));
+  }
+
+  restoreVirtual(id: string): Observable<VirtualNode> {
+    return this.http.post<ApiResponse<VirtualNode>>(`${this.apiUrl}/virtual-drive/nodes/${id}/restore`, {}).pipe(map((response) => response.data));
+  }
+
+  permanentDeleteVirtual(id: string): Observable<{ deleted: true }> {
+    return this.http.delete<ApiResponse<{ deleted: true }>>(`${this.apiUrl}/virtual-drive/nodes/${id}/permanent`).pipe(map((response) => response.data));
+  }
+
+  getVirtualRecent(): Observable<VirtualNode[]> {
+    return this.http.get<ApiResponse<VirtualNode[]>>(`${this.apiUrl}/virtual-drive/recent`).pipe(map((response) => response.data));
+  }
+
+  getVirtualFavorites(): Observable<VirtualNode[]> {
+    return this.http.get<ApiResponse<VirtualNode[]>>(`${this.apiUrl}/virtual-drive/favorites`).pipe(map((response) => response.data));
+  }
+
+  getVirtualTrash(): Observable<VirtualNode[]> {
+    return this.http.get<ApiResponse<VirtualNode[]>>(`${this.apiUrl}/virtual-drive/trash`).pipe(map((response) => response.data));
+  }
+
+  setVirtualFavorite(id: string, favorite: boolean): Observable<VirtualNode> {
+    const request = favorite ? this.http.post<ApiResponse<VirtualNode>>(`${this.apiUrl}/virtual-drive/nodes/${id}/favorite`, {}) : this.http.delete<ApiResponse<VirtualNode>>(`${this.apiUrl}/virtual-drive/nodes/${id}/favorite`);
+    return request.pipe(map((response) => response.data));
+  }
+
+  downloadVirtual(id: string): Observable<Blob> {
+    return this.http.get(`${this.apiUrl}/virtual-drive/nodes/${id}/download`, { responseType: 'blob' });
+  }
+
+  rebalanceVirtual(): Observable<{ queued: number; skipped: number }> {
+    return this.http.post<ApiResponse<{ queued: number; skipped: number }>>(`${this.apiUrl}/virtual-drive/rebalance`, {}).pipe(map((response) => response.data));
   }
 }

@@ -26,6 +26,7 @@ import { CreateVirtualFolderDto } from './dto/create-virtual-folder.dto';
 import { MoveVirtualNodeDto } from './dto/move-virtual-node.dto';
 import { UpdateVirtualNodeDto } from './dto/update-virtual-node.dto';
 import { VirtualDriveService } from './virtual-drive.service';
+import { ReplicaHealthService } from './replica-health.service';
 
 const uploadDirectory = join(require('node:os').tmpdir(), 'cloudfusion-replication');
 mkdirSync(uploadDirectory, { recursive: true });
@@ -35,7 +36,7 @@ mkdirSync(uploadDirectory, { recursive: true });
 @UseGuards(AccessTokenGuard)
 @Controller('virtual-drive')
 export class VirtualDriveController {
-  constructor(private readonly service: VirtualDriveService) {}
+  constructor(private readonly service: VirtualDriveService, private readonly health: ReplicaHealthService) {}
 
   @Get('root')
   @ApiOperation({ summary: 'Get or initialize the authenticated user drive root' })
@@ -98,6 +99,10 @@ export class VirtualDriveController {
   @ApiOperation({ summary: 'List favorite virtual nodes' })
   favorites(@Req() request: AuthenticatedRequest) { return this.service.favorites(request.user.sub); }
 
+  @Get('trash')
+  @ApiOperation({ summary: 'List soft-deleted virtual nodes in trash' })
+  trashItems(@Req() request: AuthenticatedRequest) { return this.service.trashList(request.user.sub); }
+
   @Post('nodes/:id/favorite')
   @ApiOperation({ summary: 'Mark a virtual node as favorite' })
   favorite(@Req() request: AuthenticatedRequest, @Param('id') id: string) { return this.service.setFavorite(request.user.sub, id, true); }
@@ -105,6 +110,22 @@ export class VirtualDriveController {
   @Delete('nodes/:id/favorite')
   @ApiOperation({ summary: 'Remove a virtual node from favorites' })
   unfavorite(@Req() request: AuthenticatedRequest, @Param('id') id: string) { return this.service.setFavorite(request.user.sub, id, false); }
+
+  @Get('storage-overview')
+  @ApiOperation({ summary: 'Show logical and physical CloudFusion storage usage' })
+  storageOverview(@Req() request: AuthenticatedRequest) { return this.service.storageOverview(request.user.sub); }
+
+  @Get('accounts/:accountId/impact')
+  @ApiOperation({ summary: 'Show replica impact before disconnecting a cloud account' })
+  accountImpact(@Req() request: AuthenticatedRequest, @Param('accountId') accountId: string) { return this.service.accountImpact(request.user.sub, accountId); }
+
+  @Post('replicas/:replicaId/verify')
+  @ApiOperation({ summary: 'Verify a replica remotely with size and SHA-256' })
+  verifyReplica(@Req() request: AuthenticatedRequest, @Param('replicaId') replicaId: string) { return this.health.verify(replicaId, request.user.sub); }
+
+  @Post('rebalance')
+  @ApiOperation({ summary: 'Queue repairs for degraded objects on available accounts' })
+  rebalance(@Req() request: AuthenticatedRequest) { return this.health.rebalance(request.user.sub); }
 
   @Get('children')
   @ApiOperation({ summary: 'List children from root when no parent route is available' })

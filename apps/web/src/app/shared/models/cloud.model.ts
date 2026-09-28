@@ -40,6 +40,27 @@ export interface CloudFile {
 }
 
 export type TransferOperation = 'COPY' | 'MOVE';
+
+export type VirtualNodeType = 'FILE' | 'FOLDER';
+export type VirtualNodeStatus = 'AVAILABLE' | 'UPLOADING' | 'DEGRADED' | 'UNAVAILABLE' | 'DELETING' | 'ERROR';
+
+export interface VirtualNode {
+  id: string;
+  userId: string;
+  parentId: string | null;
+  name: string;
+  type: VirtualNodeType;
+  mimeType: string | null;
+  size: number | null;
+  status: VirtualNodeStatus;
+  storageObjectId: string | null;
+  isRoot: boolean;
+  isFavorite: boolean;
+  deletedAt: string | null;
+  lastAccessedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
 export type TransferStatus = 'QUEUED' | 'PREPARING' | 'TRANSFERRING' | 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'RETRYING';
 export type ConflictStrategy = 'RENAME' | 'OVERWRITE' | 'SKIP';
 
