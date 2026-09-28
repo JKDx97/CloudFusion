@@ -14,6 +14,7 @@ import { ReplicationWorkerService } from './replication-worker.service';
 import { ReplicaHealthService } from './replica-health.service';
 import { EncryptionService } from '../data-protection/encryption.service';
 import { KeyManagementService } from '../data-protection/key-management.service';
+import { KeyRotationService } from '../data-protection/key-rotation.service';
 
 @Module({
   imports: [TypeOrmModule.forFeature([VirtualNode, StorageObject, StorageReplica, StoragePolicy]), ConfigModule, CloudAccountsModule, AuditModule],
@@ -29,6 +30,7 @@ import { KeyManagementService } from '../data-protection/key-management.service'
     ReplicationWorkerService,
     ReplicaHealthService,
     KeyManagementService,
+    KeyRotationService,
     EncryptionService,
   ],
   exports: [VirtualDriveService],

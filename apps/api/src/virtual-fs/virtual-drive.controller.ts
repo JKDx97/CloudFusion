@@ -27,6 +27,7 @@ import { MoveVirtualNodeDto } from './dto/move-virtual-node.dto';
 import { UpdateVirtualNodeDto } from './dto/update-virtual-node.dto';
 import { VirtualDriveService } from './virtual-drive.service';
 import { ReplicaHealthService } from './replica-health.service';
+import { KeyRotationService } from '../data-protection/key-rotation.service';
 
 const uploadDirectory = join(require('node:os').tmpdir(), 'cloudfusion-replication');
 mkdirSync(uploadDirectory, { recursive: true });
@@ -36,7 +37,11 @@ mkdirSync(uploadDirectory, { recursive: true });
 @UseGuards(AccessTokenGuard)
 @Controller('virtual-drive')
 export class VirtualDriveController {
-  constructor(private readonly service: VirtualDriveService, private readonly health: ReplicaHealthService) {}
+  constructor(
+    private readonly service: VirtualDriveService,
+    private readonly health: ReplicaHealthService,
+    private readonly keyRotation: KeyRotationService,
+  ) {}
 
   @Get('root')
   @ApiOperation({ summary: 'Get or initialize the authenticated user drive root' })
@@ -126,6 +131,16 @@ export class VirtualDriveController {
   @Post('rebalance')
   @ApiOperation({ summary: 'Queue repairs for degraded objects on available accounts' })
   rebalance(@Req() request: AuthenticatedRequest) { return this.health.rebalance(request.user.sub); }
+
+  @Post('security/rotate-keys')
+  @ApiOperation({ summary: 'Rewrap a batch of this user’s file keys with the current master key' })
+  rotateKeys(
+    @Req() request: AuthenticatedRequest,
+    @Query('cursor') cursor?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.keyRotation.rotateUserBatch(request.user.sub, cursor, limit ? Number(limit) : 100);
+  }
 
   @Get('children')
   @ApiOperation({ summary: 'List children from root when no parent route is available' })
