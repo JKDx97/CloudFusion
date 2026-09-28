@@ -53,6 +53,15 @@ export interface VirtualNodeResponse {
   updatedAt: Date;
 }
 
+export interface VirtualUploadResult {
+  node: VirtualNodeResponse;
+  queued: boolean;
+  replicas: number;
+  deduplicated?: boolean;
+  version?: { id: string; versionNumber: number; checksum: string; size: number; createdAt: Date };
+  warning?: string;
+}
+
 @Injectable()
 export class VirtualDriveService {
   constructor(
@@ -86,6 +95,18 @@ export class VirtualDriveService {
   async download(userId: string, id: string): Promise<CloudDownload> {
     const node = await this.findOwned(id, userId);
     if (node.type !== VirtualNodeType.FILE || !node.storageObjectId) throw new BadRequestException('Only virtual files can be downloaded');
+    return this.downloadStorageObject(userId, node, node.storageObjectId);
+  }
+
+  async downloadVersion(userId: string, id: string, versionId: string): Promise<CloudDownload> {
+    const node = await this.findOwned(id, userId);
+    if (node.type !== VirtualNodeType.FILE) throw new BadRequestException('Only virtual files can be downloaded');
+    const version = await this.fileVersions.findOne({ where: { id: versionId, virtualNodeId: node.id } });
+    if (!version) throw new NotFoundException('File version not found');
+    return this.downloadStorageObject(userId, node, version.storageObjectId);
+  }
+
+  private async downloadStorageObject(userId: string, node: VirtualNode, storageObjectId: string): Promise<CloudDownload> {
     const object = await this.objects.createQueryBuilder('storageObject')
       .addSelect([
         'storageObject.encryptedDek',
@@ -94,7 +115,7 @@ export class VirtualDriveService {
         'storageObject.contentIv',
         'storageObject.contentAuthTag',
       ])
-      .where('storageObject.id = :id AND storageObject.userId = :userId', { id: node.storageObjectId, userId })
+      .where('storageObject.id = :id AND storageObject.userId = :userId', { id: storageObjectId, userId })
       .getOne();
     if (!object) throw new NotFoundException('Storage object not found');
     const replicas = await this.replicas.find({ where: { storageObjectId: object.id }, order: { status: 'ASC', lastVerifiedAt: 'DESC' } });
@@ -191,18 +212,34 @@ export class VirtualDriveService {
     return this.toResponse(folder);
   }
 
-  async upload(userId: string, file: Express.Multer.File, parentId?: string): Promise<{
-    node: VirtualNodeResponse;
-    queued: boolean;
-    replicas: number;
-    deduplicated?: boolean;
-    warning?: string;
-  }> {
+  async upload(userId: string, file: Express.Multer.File, parentId?: string): Promise<VirtualUploadResult> {
+    return this.uploadContent(userId, file, parentId);
+  }
+
+  async uploadVersion(userId: string, id: string, file: Express.Multer.File, comment?: string): Promise<VirtualUploadResult> {
+    const node = await this.findOwned(id, userId);
+    if (node.type !== VirtualNodeType.FILE) throw new BadRequestException('Only files can have new versions');
+    const normalizedComment = comment?.trim() || undefined;
+    if (normalizedComment && normalizedComment.length > 500) throw new BadRequestException('Version comments must be 500 characters or fewer');
+    return this.uploadContent(userId, file, node.parentId ?? undefined, node.id, normalizedComment);
+  }
+
+  private async uploadContent(
+    userId: string,
+    file: Express.Multer.File,
+    parentId?: string,
+    versionNodeId?: string,
+    versionComment?: string,
+  ): Promise<VirtualUploadResult> {
     if (!file) throw new BadRequestException('A file is required');
-    const parent = parentId ? await this.findOwned(parentId, userId) : await this.ensureRoot(userId);
+    const targetNode = versionNodeId ? await this.findOwned(versionNodeId, userId) : null;
+    if (targetNode && targetNode.type !== VirtualNodeType.FILE) throw new BadRequestException('Only files can have new versions');
+    const parent = targetNode
+      ? targetNode.parentId ? await this.findOwned(targetNode.parentId, userId) : await this.ensureRoot(userId)
+      : parentId ? await this.findOwned(parentId, userId) : await this.ensureRoot(userId);
     if (parent.type !== VirtualNodeType.FOLDER) throw new BadRequestException('Parent node must be a folder');
-    const name = this.cleanName(file.originalname);
-    await this.ensureAvailableName(userId, parent.id, name);
+    const name = targetNode ? targetNode.name : this.cleanName(file.originalname);
+    if (!targetNode) await this.ensureAvailableName(userId, parent.id, name);
     const policy = await this.ensureDefaultPolicy(userId);
     const storageObjectId = randomUUID();
     const encryptedDirectory = join(tmpdir(), 'cloudfusion-encrypted-uploads');
@@ -224,8 +261,20 @@ export class VirtualDriveService {
         const objectRepository = manager.getRepository(StorageObject);
         const nodeRepository = manager.getRepository(VirtualNode);
         const versionRepository = manager.getRepository(FileVersion);
+        const versionTarget = versionNodeId
+          ? await nodeRepository.createQueryBuilder('virtualNode')
+            .setLock('pessimistic_write')
+            .where('virtualNode.id = :id AND virtualNode.userId = :userId AND virtualNode.deletedAt IS NULL', { id: versionNodeId, userId })
+            .getOne()
+          : null;
+        if (versionNodeId && (!versionTarget || versionTarget.type !== VirtualNodeType.FILE)) throw new NotFoundException('Virtual file not found');
         const lockKey = `${userId}:${encrypted.checksum}:${encrypted.logicalSize}`;
         await manager.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [lockKey]);
+        const nextVersionNumber = async (nodeId: string | undefined): Promise<number> => {
+          if (!nodeId) return 1;
+          const latest = await versionRepository.findOne({ where: { virtualNodeId: nodeId }, order: { versionNumber: 'DESC' } });
+          return (latest?.versionNumber ?? 0) + 1;
+        };
         const existing = await objectRepository.createQueryBuilder('storageObject')
           .setLock('pessimistic_write')
           .where('storageObject.userId = :userId', { userId })
@@ -237,33 +286,37 @@ export class VirtualDriveService {
         if (existing) {
           existing.referenceCount += 1;
           const sharedObject = await objectRepository.save(existing);
-          const sharedNode = await nodeRepository.save(nodeRepository.create({
-            userId,
-            parentId: parent.id,
-            name,
-            type: VirtualNodeType.FILE,
-            mimeType: file.mimetype || null,
-            size: String(file.size),
-            status: sharedObject.status as unknown as VirtualNodeStatus,
-            storageObjectId: sharedObject.id,
-            deletedAt: null,
-            previousParentId: null,
-            isRoot: false,
-            isFavorite: false,
-            lastAccessedAt: null,
-          }));
+          const sharedNode = versionTarget ?? await nodeRepository.save(nodeRepository.create({
+              userId,
+              parentId: parent.id,
+              name,
+              type: VirtualNodeType.FILE,
+              mimeType: file.mimetype || null,
+              size: String(file.size),
+              status: sharedObject.status as unknown as VirtualNodeStatus,
+              storageObjectId: sharedObject.id,
+              deletedAt: null,
+              previousParentId: null,
+              isRoot: false,
+              isFavorite: false,
+              lastAccessedAt: null,
+            }));
+          sharedNode.storageObjectId = sharedObject.id;
+          sharedNode.size = String(encrypted.logicalSize);
+          sharedNode.mimeType = file.mimetype || null;
+          sharedNode.status = sharedObject.status as unknown as VirtualNodeStatus;
           const version = await versionRepository.save(versionRepository.create({
             virtualNodeId: sharedNode.id,
             storageObjectId: sharedObject.id,
-            versionNumber: 1,
+            versionNumber: await nextVersionNumber(versionTarget?.id),
             size: String(encrypted.logicalSize),
             checksum: encrypted.checksum,
             createdBy: userId,
-            comment: null,
+            comment: versionComment ?? null,
           }));
           sharedNode.currentVersionId = version.id;
-          await nodeRepository.save(sharedNode);
-          return { storageObject: sharedObject, node: sharedNode, deduplicated: true };
+          const savedNode = await nodeRepository.save(sharedNode);
+          return { storageObject: sharedObject, node: savedNode, version, deduplicated: true };
         }
 
         const storageObject = await objectRepository.save(objectRepository.create({
@@ -289,40 +342,45 @@ export class VirtualDriveService {
           status: StorageObjectStatus.UPLOADING,
           policyId: policy.id,
         }));
-        const node = await nodeRepository.save(nodeRepository.create({
-          userId,
-          parentId: parent.id,
-          name,
-          type: VirtualNodeType.FILE,
-          mimeType: file.mimetype || null,
-          size: String(file.size),
-          status: VirtualNodeStatus.UPLOADING,
-          storageObjectId: storageObject.id,
-          deletedAt: null,
-          previousParentId: null,
-          isRoot: false,
-          isFavorite: false,
-          lastAccessedAt: null,
-        }));
+        const node = versionTarget ?? await nodeRepository.save(nodeRepository.create({
+            userId,
+            parentId: parent.id,
+            name,
+            type: VirtualNodeType.FILE,
+            mimeType: file.mimetype || null,
+            size: String(file.size),
+            status: VirtualNodeStatus.UPLOADING,
+            storageObjectId: storageObject.id,
+            deletedAt: null,
+            previousParentId: null,
+            isRoot: false,
+            isFavorite: false,
+            lastAccessedAt: null,
+          }));
+        node.storageObjectId = storageObject.id;
+        node.size = String(encrypted.logicalSize);
+        node.mimeType = file.mimetype || null;
+        node.status = VirtualNodeStatus.UPLOADING;
         const version = await versionRepository.save(versionRepository.create({
           virtualNodeId: node.id,
           storageObjectId: storageObject.id,
-          versionNumber: 1,
+          versionNumber: await nextVersionNumber(versionTarget?.id),
           size: String(encrypted.logicalSize),
           checksum: encrypted.checksum,
           createdBy: userId,
-          comment: null,
+          comment: versionComment ?? null,
         }));
         node.currentVersionId = version.id;
-        await nodeRepository.save(node);
-        return { storageObject, node, deduplicated: false };
+        const savedNode = await nodeRepository.save(node);
+        return { storageObject, node: savedNode, version, deduplicated: false };
       });
 
-      const { storageObject, node } = created;
+      const { storageObject, node, version } = created;
+      const versionInfo = { id: version.id, versionNumber: version.versionNumber, checksum: version.checksum, size: Number(version.size), createdAt: version.createdAt };
       if (created.deduplicated) {
         const replicaCount = await this.replicas.count({ where: { storageObjectId: storageObject.id } });
-        await this.audit.record(userId, 'VIRTUAL_UPLOAD_DEDUPLICATED', 'VirtualNode', node.id, { storageObjectId: storageObject.id });
-        return { node: this.toResponse(node), queued: false, replicas: replicaCount, deduplicated: true };
+        await this.audit.record(userId, versionNodeId ? 'VIRTUAL_FILE_VERSION_CREATED' : 'VIRTUAL_UPLOAD_DEDUPLICATED', 'VirtualNode', node.id, { storageObjectId: storageObject.id, versionNumber: version.versionNumber });
+        return { node: this.toResponse(node), queued: false, replicas: replicaCount, deduplicated: true, version: versionInfo };
       }
 
       const destinations = this.selectDestinations(await this.accounts.list(userId), policy.replicationFactor, file.size);
@@ -332,7 +390,7 @@ export class VirtualDriveService {
         await this.objects.save(storageObject);
         await this.nodes.save(node);
         await this.audit.record(userId, 'VIRTUAL_UPLOAD_UNAVAILABLE', 'VirtualNode', node.id, { reason: 'NO_CONNECTED_STORAGE_ACCOUNT' });
-        return { node: this.toResponse(node), queued: false, replicas: 0, warning: 'Conecta al menos una cuenta cloud para guardar físicamente el archivo.' };
+        return { node: this.toResponse(node), queued: false, replicas: 0, version: versionInfo, warning: 'Conecta al menos una cuenta cloud para guardar físicamente el archivo.' };
       }
       const replicaEntities = await this.replicas.save(destinations.map((account) => this.replicas.create({
         storageObjectId: storageObject.id,
@@ -365,8 +423,8 @@ export class VirtualDriveService {
         await this.nodes.save(node);
         await this.objects.save(storageObject);
       }
-      await this.audit.record(userId, 'VIRTUAL_UPLOAD_QUEUED', 'VirtualNode', node.id, { replicationFactor: replicaEntities.length });
-      return { node: this.toResponse(node), queued, replicas: replicaEntities.length };
+      await this.audit.record(userId, versionNodeId ? 'VIRTUAL_FILE_VERSION_CREATED' : 'VIRTUAL_UPLOAD_QUEUED', 'VirtualNode', node.id, { replicationFactor: replicaEntities.length, versionNumber: version.versionNumber });
+      return { node: this.toResponse(node), queued, replicas: replicaEntities.length, version: versionInfo };
     } finally {
       if (!handedToWorker) await unlink(encryptedPath).catch(() => undefined);
     }
@@ -439,6 +497,10 @@ export class VirtualDriveService {
       const objectRepository = manager.getRepository(StorageObject);
       const nodeRepository = manager.getRepository(VirtualNode);
       const versionRepository = manager.getRepository(FileVersion);
+      await manager.query(
+        'SELECT "id" FROM "virtual_nodes" WHERE "id" = ANY($1::uuid[]) ORDER BY "id" FOR UPDATE',
+        [all.map((item) => item.id)],
+      );
       for (const objectId of objectIds) {
         await objectRepository.createQueryBuilder('storageObject')
           .setLock('pessimistic_write')
@@ -508,6 +570,55 @@ export class VirtualDriveService {
       comment: version.comment,
       current: version.id === node.currentVersionId,
     }));
+  }
+
+  async restoreVersion(userId: string, id: string, versionId: string): Promise<VirtualNodeResponse> {
+    const ownedNode = await this.findOwned(id, userId);
+    if (ownedNode.type !== VirtualNodeType.FILE) throw new BadRequestException('Only files can restore versions');
+    const restored = await this.dataSource.transaction(async (manager) => {
+      const nodeRepository = manager.getRepository(VirtualNode);
+      const objectRepository = manager.getRepository(StorageObject);
+      const versionRepository = manager.getRepository(FileVersion);
+      const node = await nodeRepository.createQueryBuilder('virtualNode')
+        .setLock('pessimistic_write')
+        .where('virtualNode.id = :id AND virtualNode.userId = :userId AND virtualNode.deletedAt IS NULL', { id, userId })
+        .getOne();
+      if (!node || node.type !== VirtualNodeType.FILE) throw new NotFoundException('Virtual file not found');
+      const source = await versionRepository.findOne({ where: { id: versionId, virtualNodeId: node.id } });
+      if (!source) throw new NotFoundException('File version not found');
+      const object = await objectRepository.createQueryBuilder('storageObject')
+        .setLock('pessimistic_write')
+        .where('storageObject.id = :objectId AND storageObject.userId = :userId AND storageObject.lifecycleStatus = :active', {
+          objectId: source.storageObjectId,
+          userId,
+          active: 'ACTIVE',
+        })
+        .getOne();
+      if (!object) throw new NotFoundException('Version content is no longer available');
+      const latest = await versionRepository.findOne({ where: { virtualNodeId: node.id }, order: { versionNumber: 'DESC' } });
+      object.referenceCount += 1;
+      await objectRepository.save(object);
+      const version = await versionRepository.save(versionRepository.create({
+        virtualNodeId: node.id,
+        storageObjectId: object.id,
+        versionNumber: (latest?.versionNumber ?? 0) + 1,
+        size: source.size,
+        checksum: source.checksum,
+        createdBy: userId,
+        comment: `Restored from version ${source.versionNumber}`,
+      }));
+      node.storageObjectId = object.id;
+      node.currentVersionId = version.id;
+      node.size = source.size;
+      node.mimeType = object.mimeType;
+      node.status = object.status as unknown as VirtualNodeStatus;
+      return { node: await nodeRepository.save(node), version };
+    });
+    await this.audit.record(userId, 'VIRTUAL_FILE_VERSION_RESTORED', 'VirtualNode', id, {
+      sourceVersionId: versionId,
+      versionNumber: restored.version.versionNumber,
+    });
+    return this.toResponse(restored.node);
   }
 
   async favorites(userId: string): Promise<VirtualNodeResponse[]> {

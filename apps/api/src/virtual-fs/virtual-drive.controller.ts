@@ -71,6 +71,45 @@ export class VirtualDriveController {
     return this.service.versionHistory(request.user.sub, id);
   }
 
+  @Post('nodes/:id/versions')
+  @ApiOperation({ summary: 'Upload a new protected version while preserving prior versions' })
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({ schema: { type: 'object', required: ['file'], properties: { file: { type: 'string', format: 'binary' }, comment: { type: 'string' } } } })
+  @UseInterceptors(FileInterceptor('file', { storage: diskStorage({ destination: uploadDirectory, filename: (_request, file, callback) => callback(null, `${Date.now()}-${randomBytes(8).toString('hex')}-${file.originalname}`) }), limits: { fileSize: Number(process.env.CLOUD_UPLOAD_MAX_BYTES ?? 52_428_800) } }))
+  uploadVersion(
+    @Req() request: AuthenticatedRequest,
+    @Param('id') id: string,
+    @UploadedFile() file: Express.Multer.File,
+    @Body('comment') comment?: string,
+  ) {
+    return this.service.uploadVersion(request.user.sub, id, file, comment);
+  }
+
+  @Post('nodes/:id/versions/:versionId/restore')
+  @ApiOperation({ summary: 'Restore historical content as a new current version' })
+  restoreVersion(
+    @Req() request: AuthenticatedRequest,
+    @Param('id') id: string,
+    @Param('versionId') versionId: string,
+  ) {
+    return this.service.restoreVersion(request.user.sub, id, versionId);
+  }
+
+  @Get('nodes/:id/versions/:versionId/download')
+  @ApiOperation({ summary: 'Download an owned historical file version through encrypted replica verification' })
+  async downloadVersion(
+    @Req() request: AuthenticatedRequest,
+    @Param('id') id: string,
+    @Param('versionId') versionId: string,
+    @Res() response: Response,
+  ): Promise<void> {
+    const file = await this.service.downloadVersion(request.user.sub, id, versionId);
+    response.setHeader('Content-Disposition', `attachment; filename="${encodeURIComponent(file.fileName)}"`);
+    if (file.mimeType) response.setHeader('Content-Type', file.mimeType);
+    if (file.size != null) response.setHeader('Content-Length', String(file.size));
+    file.stream.pipe(response);
+  }
+
   @Post('folders')
   @ApiOperation({ summary: 'Create a metadata-only virtual folder' })
   folder(@Req() request: AuthenticatedRequest, @Body() dto: CreateVirtualFolderDto) { return this.service.createFolder(request.user.sub, dto); }
