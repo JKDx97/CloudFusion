@@ -5,9 +5,10 @@ import { StorageRule } from './entities/storage-rule.entity';
 import { StorageRulesController } from './storage-rules.controller';
 import { StorageRuleEngine } from './storage-rule-engine.service';
 import { StorageRuleService } from './storage-rule.service';
+import { AuditModule } from '../audit/audit.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([StorageRule]), CloudAccountsModule],
+  imports: [TypeOrmModule.forFeature([StorageRule]), CloudAccountsModule, AuditModule],
   controllers: [StorageRulesController],
   providers: [StorageRuleService, StorageRuleEngine],
   exports: [StorageRuleService, StorageRuleEngine],

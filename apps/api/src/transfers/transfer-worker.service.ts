@@ -9,6 +9,7 @@ import { TransferStatus } from './enums/transfer-status.enum';
 import { TransferExecutionService, TransferCancelledError } from './transfer-execution.service';
 import { TransferQueuePayload } from './transfer-queue.service';
 import { TransferProgressService } from './transfer-progress.service';
+import { AuditService } from '../audit/audit.service';
 
 @Injectable()
 export class TransferWorkerService implements OnModuleInit, OnModuleDestroy {
@@ -21,6 +22,7 @@ export class TransferWorkerService implements OnModuleInit, OnModuleDestroy {
     private readonly config: ConfigService,
     private readonly execution: TransferExecutionService,
     private readonly progress: TransferProgressService,
+    private readonly audit: AuditService,
   ) {}
 
   onModuleInit(): void {
@@ -50,6 +52,13 @@ export class TransferWorkerService implements OnModuleInit, OnModuleDestroy {
     if (!transfer || transfer.status === TransferStatus.CANCELLED) return;
     try {
       await this.execution.execute(transfer.id, queueJob);
+      const completed = await this.repository.findOne({ where: { id: transfer.id } });
+      if (completed?.status === TransferStatus.COMPLETED) {
+        await this.audit.record(completed.userId, 'TRANSFER_COMPLETED', 'TransferJob', completed.id, {
+          operation: completed.operation,
+          bytesTransferred: Number(completed.bytesTransferred ?? 0),
+        });
+      }
     } catch (error) {
       const current = await this.repository.findOne({ where: { id: transfer.id } });
       if (!current) return;
@@ -57,6 +66,7 @@ export class TransferWorkerService implements OnModuleInit, OnModuleDestroy {
         current.status = TransferStatus.CANCELLED;
         current.completedAt = new Date();
         await this.save(current);
+        await this.audit.record(current.userId, 'TRANSFER_CANCELLED', 'TransferJob', current.id, {});
         return;
       }
       const { code, message } = this.errorDetails(error);
@@ -74,6 +84,7 @@ export class TransferWorkerService implements OnModuleInit, OnModuleDestroy {
       current.errorMessage = message;
       current.completedAt = new Date();
       await this.save(current);
+      await this.audit.record(current.userId, 'TRANSFER_FAILED', 'TransferJob', current.id, { errorCode: code });
     }
   }
 

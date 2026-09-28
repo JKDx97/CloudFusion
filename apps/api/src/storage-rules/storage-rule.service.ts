@@ -5,6 +5,7 @@ import { CloudAccountService } from '../cloud-accounts/cloud-account.service';
 import { StorageRule } from './entities/storage-rule.entity';
 import { CreateStorageRuleDto } from './dto/create-storage-rule.dto';
 import { UpdateStorageRuleDto } from './dto/update-storage-rule.dto';
+import { AuditService } from '../audit/audit.service';
 
 @Injectable()
 export class StorageRuleService {
@@ -12,6 +13,7 @@ export class StorageRuleService {
     @InjectRepository(StorageRule)
     private readonly repository: Repository<StorageRule>,
     private readonly accounts: CloudAccountService,
+    private readonly audit: AuditService,
   ) {}
 
   async list(userId: string): Promise<StorageRule[]> {
@@ -30,7 +32,9 @@ export class StorageRuleService {
       destinationAccountId: dto.destinationAccountId,
       destinationFolderId: dto.destinationFolderId ?? null,
     });
-    return this.repository.save(rule);
+    const saved = await this.repository.save(rule);
+    await this.audit.record(userId, 'STORAGE_RULE_CREATED', 'StorageRule', saved.id, { conditionType: saved.conditionType, priority: saved.priority });
+    return saved;
   }
 
   async update(userId: string, id: string, dto: UpdateStorageRuleDto): Promise<StorageRule> {
@@ -45,12 +49,15 @@ export class StorageRuleService {
       destinationAccountId: accountId,
       destinationFolderId: folderId ?? null,
     });
-    return this.repository.save(rule);
+    const saved = await this.repository.save(rule);
+    await this.audit.record(userId, 'STORAGE_RULE_UPDATED', 'StorageRule', saved.id, { conditionType: saved.conditionType, priority: saved.priority, enabled: saved.enabled });
+    return saved;
   }
 
   async remove(userId: string, id: string): Promise<{ deleted: true }> {
     const rule = await this.getOwned(userId, id);
     await this.repository.remove(rule);
+    await this.audit.record(userId, 'STORAGE_RULE_DELETED', 'StorageRule', id);
     return { deleted: true };
   }
 

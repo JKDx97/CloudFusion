@@ -15,6 +15,7 @@ import { TransferStatus } from './enums/transfer-status.enum';
 import { CreateTransferDto } from './dto/create-transfer.dto';
 import { TransferQueueService } from './transfer-queue.service';
 import { TransferProgressService } from './transfer-progress.service';
+import { AuditService } from '../audit/audit.service';
 
 export interface TransferJobPublic {
   id: string;
@@ -50,6 +51,7 @@ export class TransferService {
     private readonly accounts: CloudAccountService,
     private readonly queue: TransferQueueService,
     private readonly progress: TransferProgressService,
+    private readonly audit: AuditService,
   ) {}
 
   async create(userId: string, dto: CreateTransferDto): Promise<TransferJobPublic> {
@@ -106,6 +108,7 @@ export class TransferService {
       throw new ConflictException('Transfer queue is unavailable');
     }
     this.progress.emit(saved);
+    await this.audit.record(userId, 'TRANSFER_CREATED', 'TransferJob', saved.id, { operation: saved.operation, sourceProvider: saved.sourceProvider, destinationProvider: saved.destinationProvider });
     return this.toPublic(saved);
   }
 
@@ -137,6 +140,7 @@ export class TransferService {
     const saved = await this.repository.save(job);
     await this.queue.enqueue(saved.id);
     this.progress.emit(saved);
+    await this.audit.record(userId, 'TRANSFER_RETRYING', 'TransferJob', saved.id, {});
     return this.toPublic(saved);
   }
 
@@ -151,6 +155,7 @@ export class TransferService {
     const saved = await this.repository.save(job);
     await this.queue.cancel(id).catch(() => undefined);
     this.progress.emit(saved);
+    await this.audit.record(userId, 'TRANSFER_CANCELLED', 'TransferJob', saved.id, {});
     return this.toPublic(saved);
   }
 
@@ -160,6 +165,7 @@ export class TransferService {
       throw new ConflictException('Active transfers must be cancelled before deletion');
     }
     await this.repository.remove(job);
+    await this.audit.record(userId, 'TRANSFER_DELETED', 'TransferJob', id, {});
     return { deleted: true };
   }
 
