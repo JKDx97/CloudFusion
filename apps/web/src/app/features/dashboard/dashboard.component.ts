@@ -143,8 +143,24 @@ export class DashboardComponent {
   }
 
   disconnect(account: CloudAccount): void {
-    if (!window.confirm(`¿Desconectar ${this.providerLabel(account.provider)}?`)) return;
-    this.cloudService.disconnect(account.id).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({ next: () => { this.notice.set('Cuenta desconectada.'); this.reload(); }, error: () => this.error.set('No se pudo desconectar la cuenta.') });
+    this.cloudService.getAccountImpact(account.id).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: (impact) => {
+        const effects = [
+          impact.objectsOnlyOnThisAccount ? `${impact.objectsOnlyOnThisAccount} objetos sin otra réplica conectada` : '',
+          impact.versionsAtRisk ? `${impact.versionsAtRisk} versiones potencialmente inaccesibles` : '',
+          impact.snapshotEntriesAtRisk ? `${impact.snapshotEntriesAtRisk} entradas de snapshots asociadas` : '',
+          impact.activeBackupPolicies ? `${impact.activeBackupPolicies} políticas de backup activas` : '',
+          impact.verifiedBackupsStored ? `${impact.verifiedBackupsStored} copias de backup en esta cuenta` : '',
+        ].filter(Boolean);
+        const details = effects.length ? `\n\nImpacto detectado:\n• ${effects.join('\n• ')}\n\nEl contenido remoto no se borra, pero puede quedar inaccesible hasta reconectar o reparar las réplicas.` : '';
+        if (!window.confirm(`¿Desconectar ${this.providerLabel(account.provider)}?${details}`)) return;
+        this.cloudService.disconnect(account.id, true).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+          next: () => { this.notice.set('Cuenta desconectada. Los datos y backups remotos no fueron eliminados.'); this.reload(); },
+          error: () => this.error.set('No se pudo desconectar la cuenta.'),
+        });
+      },
+      error: () => this.error.set('No se pudo calcular el impacto; la cuenta no fue desconectada.'),
+    });
   }
 
   refreshAccount(account: CloudAccount): void {

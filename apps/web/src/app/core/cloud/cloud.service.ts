@@ -4,7 +4,7 @@ import { Observable, map } from 'rxjs';
 import { AuthService } from '../auth/auth.service';
 import { environment } from '../../../environments/environment';
 import { ApiResponse } from '../../shared/models/api-response.model';
-import { CloudAccount, CloudFile, CloudProvider, CloudSearchResponse, CloudStorageSummary, FileVersionRecord, SnapshotEntryRecord, SnapshotRecord, SnapshotRestoreJobRecord, StorageRule, TransferJob, TransferProgressEvent, TransferOperation, VirtualNode } from '../../shared/models/cloud.model';
+import { BackupJobRecord, BackupPolicyRecord, CloudAccount, CloudAccountImpactRecord, CloudFile, CloudProvider, CloudSearchResponse, CloudStorageSummary, FileVersionRecord, ProtectionAlertRecord, ProtectionOverviewRecord, SnapshotEntryRecord, SnapshotRecord, SnapshotRestoreJobRecord, StorageRule, TransferJob, TransferProgressEvent, TransferOperation, VirtualNode } from '../../shared/models/cloud.model';
 
 @Injectable({ providedIn: 'root' })
 export class CloudService {
@@ -58,8 +58,13 @@ export class CloudService {
     return this.http.post<ApiResponse<CloudAccount>>(`${this.apiUrl}/cloud-accounts/${accountId}/refresh`, {}).pipe(map((response) => response.data));
   }
 
-  disconnect(accountId: string): Observable<{ disconnected: true }> {
-    return this.http.delete<ApiResponse<{ disconnected: true }>>(`${this.apiUrl}/cloud-accounts/${accountId}`).pipe(map((response) => response.data));
+  getAccountImpact(accountId: string): Observable<CloudAccountImpactRecord> {
+    return this.http.get<ApiResponse<CloudAccountImpactRecord>>(`${this.apiUrl}/cloud-accounts/${accountId}/impact`).pipe(map((response) => response.data));
+  }
+
+  disconnect(accountId: string, confirmImpact = false): Observable<{ disconnected: true }> {
+    const params = confirmImpact ? new HttpParams().set('confirmImpact', 'true') : undefined;
+    return this.http.delete<ApiResponse<{ disconnected: true }>>(`${this.apiUrl}/cloud-accounts/${accountId}`, { params }).pipe(map((response) => response.data));
   }
 
   createTransfer(input: { sourceAccountId: string; sourceFileId: string; destinationAccountId: string; destinationFolderId?: string; operation: TransferOperation; conflictStrategy?: string }): Observable<TransferJob> {
@@ -242,6 +247,46 @@ export class CloudService {
 
   deleteSnapshot(id: string): Observable<{ deleted: true }> {
     return this.http.delete<ApiResponse<{ deleted: true }>>(`${this.apiUrl}/snapshots/${id}`).pipe(map((response) => response.data));
+  }
+
+  listBackupPolicies(): Observable<BackupPolicyRecord[]> {
+    return this.http.get<ApiResponse<BackupPolicyRecord[]>>(`${this.apiUrl}/backup-policies`).pipe(map((response) => response.data));
+  }
+
+  createBackupPolicy(policy: { name: string; destinationAccountId: string; schedule: BackupPolicyRecord['schedule']; retentionDays: number }): Observable<BackupPolicyRecord> {
+    return this.http.post<ApiResponse<BackupPolicyRecord>>(`${this.apiUrl}/backup-policies`, policy).pipe(map((response) => response.data));
+  }
+
+  updateBackupPolicy(id: string, policy: Partial<Pick<BackupPolicyRecord, 'enabled' | 'name' | 'schedule' | 'retentionDays' | 'destinationAccountId'>>): Observable<BackupPolicyRecord> {
+    return this.http.patch<ApiResponse<BackupPolicyRecord>>(`${this.apiUrl}/backup-policies/${id}`, policy).pipe(map((response) => response.data));
+  }
+
+  deleteBackupPolicy(id: string): Observable<{ deleted: true }> {
+    return this.http.delete<ApiResponse<{ deleted: true }>>(`${this.apiUrl}/backup-policies/${id}`).pipe(map((response) => response.data));
+  }
+
+  runBackupPolicy(id: string): Observable<BackupJobRecord> {
+    return this.http.post<ApiResponse<BackupJobRecord>>(`${this.apiUrl}/backup-policies/${id}/run`, {}).pipe(map((response) => response.data));
+  }
+
+  listBackups(): Observable<BackupJobRecord[]> {
+    return this.http.get<ApiResponse<BackupJobRecord[]>>(`${this.apiUrl}/backups`).pipe(map((response) => response.data));
+  }
+
+  restoreBackup(id: string): Observable<SnapshotRestoreJobRecord> {
+    return this.http.post<ApiResponse<SnapshotRestoreJobRecord>>(`${this.apiUrl}/backups/${id}/restore`, {}).pipe(map((response) => response.data));
+  }
+
+  getProtectionOverview(): Observable<ProtectionOverviewRecord> {
+    return this.http.get<ApiResponse<ProtectionOverviewRecord>>(`${this.apiUrl}/protection/overview`).pipe(map((response) => response.data));
+  }
+
+  listProtectionAlerts(): Observable<ProtectionAlertRecord[]> {
+    return this.http.get<ApiResponse<ProtectionAlertRecord[]>>(`${this.apiUrl}/protection/alerts`).pipe(map((response) => response.data));
+  }
+
+  resolveProtectionAlert(id: string): Observable<ProtectionAlertRecord> {
+    return this.http.patch<ApiResponse<ProtectionAlertRecord>>(`${this.apiUrl}/protection/alerts/${id}/resolve`, {}).pipe(map((response) => response.data));
   }
 
   rebalanceVirtual(): Observable<{ queued: number; skipped: number }> {

@@ -110,6 +110,73 @@ export interface SnapshotRestoreJobRecord {
   startedAt: string | null;
   completedAt: string | null;
 }
+
+export interface BackupPolicyRecord {
+  id: string;
+  name: string;
+  enabled: boolean;
+  scope: string;
+  schedule: 'DAILY' | 'WEEKLY' | 'MONTHLY';
+  retentionDays: number;
+  destinationAccountId: string;
+  mode: string;
+  nextRunAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface BackupJobRecord {
+  id: string;
+  policyId: string | null;
+  snapshotId: string | null;
+  destinationAccountId: string;
+  status: 'QUEUED' | 'PREPARING' | 'RUNNING' | 'VERIFYING' | 'COMPLETED' | 'FAILED' | 'CANCELLED';
+  bytesProcessed: string;
+  itemsProcessed: number;
+  errors: Array<{ entryId: string; message: string }>;
+  startedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  verifiedObjects?: number;
+}
+
+export interface ProtectionAlertRecord {
+  id: string;
+  kind: string;
+  status: 'WARNING' | 'RESOLVED';
+  eventCount: number;
+  windowSeconds: number;
+  emergencySnapshotId: string | null;
+  details: Record<string, unknown>;
+  createdAt: string;
+  resolvedAt: string | null;
+}
+
+export interface ProtectionOverviewRecord {
+  encryption: { configured: boolean; algorithm: string; keyVersion: number };
+  filesProtected: number;
+  trashedItems: number;
+  fileVersions: number;
+  snapshots: number;
+  completedBackups: number;
+  degradedFiles: number;
+  corruptedReplicas: number;
+  logicalBytes: number;
+  uniqueObjectBytes: number;
+  deduplicationSavingsBytes: number;
+  activeAlerts: number;
+}
+
+export interface CloudAccountImpactRecord {
+  accountId: string;
+  replicas: number;
+  objectsOnlyOnThisAccount: number;
+  versionsAtRisk: number;
+  snapshotEntriesAtRisk: number;
+  activeBackupPolicies: number;
+  verifiedBackupsStored: number;
+  requiresConfirmation: boolean;
+}
 export type TransferStatus = 'QUEUED' | 'PREPARING' | 'TRANSFERRING' | 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'RETRYING';
 export type ConflictStrategy = 'RENAME' | 'OVERWRITE' | 'SKIP';
 
