@@ -21,6 +21,7 @@ import { VirtualNode } from './virtual-fs/entities/virtual-node.entity';
 import { StorageObject } from './virtual-fs/entities/storage-object.entity';
 import { StorageReplica } from './virtual-fs/entities/storage-replica.entity';
 import { StoragePolicy } from './virtual-fs/entities/storage-policy.entity';
+import { VirtualFsModule } from './virtual-fs/virtual-fs.module';
 
 @Module({
   imports: [
@@ -55,6 +56,7 @@ import { StoragePolicy } from './virtual-fs/entities/storage-policy.entity';
     CloudSearchModule,
     StorageRulesModule,
     AuditModule,
+    VirtualFsModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })

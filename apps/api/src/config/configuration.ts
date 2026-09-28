@@ -58,6 +58,7 @@ export default () => ({
     progressIntervalMs: Number(process.env.TRANSFER_PROGRESS_INTERVAL_MS ?? 1000),
   },
   virtualDrive: {
+    queueName: process.env.REPLICATION_QUEUE_NAME ?? 'cloudfusion-replication',
     defaultReplicationFactor: Number(process.env.DEFAULT_REPLICATION_FACTOR ?? 1),
     autoRepair: process.env.REPLICA_AUTO_REPAIR !== 'false',
     verifyIntervalHours: Number(process.env.REPLICA_VERIFY_INTERVAL_HOURS ?? 24),
