@@ -1,0 +1,52 @@
+@if (user$ | async; as user) {
+  <main class="min-h-screen bg-[#f7f8fc]">
+    <header class="border-b border-slate-200/80 bg-white/85 backdrop-blur">
+      <div class="mx-auto flex max-w-7xl items-center justify-between px-6 py-5 lg:px-10">
+        <div class="flex items-center gap-3">
+          <div class="cf-gradient flex h-10 w-10 items-center justify-center rounded-xl text-lg font-bold text-white">C</div>
+          <span class="text-lg font-semibold tracking-tight text-slate-900">CloudFusion</span>
+        </div>
+        <div class="flex items-center gap-4">
+          <div class="hidden text-right sm:block">
+            <p class="text-sm font-semibold text-slate-800">{{ user.username }}</p>
+            <p class="text-xs text-slate-500">{{ user.email }}</p>
+          </div>
+          <button class="rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-600 transition hover:border-slate-300 hover:bg-slate-50" type="button" (click)="logout()">Cerrar sesión</button>
+        </div>
+      </div>
+    </header>
+
+    <section class="mx-auto max-w-7xl px-6 py-12 lg:px-10 lg:py-16">
+      <div class="mb-10 max-w-2xl">
+        <p class="mb-3 text-sm font-semibold uppercase tracking-[0.22em] text-indigo-600">Tu espacio</p>
+        <h1 class="text-4xl font-semibold tracking-tight text-slate-950 sm:text-5xl">Bienvenido, {{ user.username }}</h1>
+        <p class="mt-4 text-lg leading-8 text-slate-500">Tu centro de almacenamiento está listo para crecer contigo.</p>
+      </div>
+
+      <div class="cf-card-shadow overflow-hidden rounded-3xl bg-white">
+        <div class="border-b border-slate-100 px-6 py-6 sm:px-8">
+          <p class="text-sm font-semibold uppercase tracking-[0.18em] text-slate-400">Almacenamiento</p>
+          <h2 class="mt-2 text-2xl font-semibold tracking-tight text-slate-900">Conecta tus servicios favoritos</h2>
+          <p class="mt-2 max-w-xl text-slate-500">Próximamente podrás reunir tus espacios en un solo lugar, con una vista clara y sencilla.</p>
+        </div>
+        <div class="grid gap-4 p-6 sm:grid-cols-3 sm:p-8">
+          <div class="rounded-2xl border border-slate-100 bg-slate-50/80 p-5">
+            <div class="mb-6 flex h-11 w-11 items-center justify-center rounded-xl bg-white text-lg font-bold text-slate-500 shadow-sm">G</div>
+            <p class="font-semibold text-slate-800">Google Drive</p>
+            <p class="mt-1 text-sm text-slate-500">Próximamente</p>
+          </div>
+          <div class="rounded-2xl border border-slate-100 bg-slate-50/80 p-5">
+            <div class="mb-6 flex h-11 w-11 items-center justify-center rounded-xl bg-white text-lg font-bold text-slate-500 shadow-sm">O</div>
+            <p class="font-semibold text-slate-800">OneDrive</p>
+            <p class="mt-1 text-sm text-slate-500">Próximamente</p>
+          </div>
+          <div class="rounded-2xl border border-slate-100 bg-slate-50/80 p-5">
+            <div class="mb-6 flex h-11 w-11 items-center justify-center rounded-xl bg-white text-lg font-bold text-slate-500 shadow-sm">D</div>
+            <p class="font-semibold text-slate-800">Dropbox</p>
+            <p class="mt-1 text-sm text-slate-500">Próximamente</p>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+}
