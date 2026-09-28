@@ -7,9 +7,11 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { createHash } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { createReadStream } from 'node:fs';
-import { unlink } from 'node:fs/promises';
+import { mkdir, unlink } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { IsNull, Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
 import { CloudAccountService, CloudAccountPublic } from '../cloud-accounts/cloud-account.service';
@@ -27,6 +29,8 @@ import { MoveVirtualNodeDto } from './dto/move-virtual-node.dto';
 import { UpdateVirtualNodeDto } from './dto/update-virtual-node.dto';
 import { ReplicationQueueService } from './replication-queue.service';
 import { CloudDownload } from '../providers/common/cloud-file.interface';
+import { EncryptionService, DecryptionMetadata } from '../data-protection/encryption.service';
+import { DataProtectionException } from '../data-protection/data-protection-error';
 
 export interface VirtualNodeResponse {
   id: string;
@@ -61,6 +65,7 @@ export class VirtualDriveService {
     private readonly queue: ReplicationQueueService,
     private readonly audit: AuditService,
     private readonly config: ConfigService,
+    private readonly encryption: EncryptionService,
   ) {}
 
   async getRoot(userId: string): Promise<VirtualNodeResponse> {
@@ -76,10 +81,20 @@ export class VirtualDriveService {
   async download(userId: string, id: string): Promise<CloudDownload> {
     const node = await this.findOwned(id, userId);
     if (node.type !== VirtualNodeType.FILE || !node.storageObjectId) throw new BadRequestException('Only virtual files can be downloaded');
-    const object = await this.objects.findOne({ where: { id: node.storageObjectId, userId } });
+    const object = await this.objects.createQueryBuilder('storageObject')
+      .addSelect([
+        'storageObject.encryptedDek',
+        'storageObject.dekIv',
+        'storageObject.dekAuthTag',
+        'storageObject.contentIv',
+        'storageObject.contentAuthTag',
+      ])
+      .where('storageObject.id = :id AND storageObject.userId = :userId', { id: node.storageObjectId, userId })
+      .getOne();
     if (!object) throw new NotFoundException('Storage object not found');
     const replicas = await this.replicas.find({ where: { storageObjectId: object.id }, order: { status: 'ASC', lastVerifiedAt: 'DESC' } });
     let failures = 0;
+    let protectionError: DataProtectionException | null = null;
     for (const replica of replicas.sort((a, b) => Number(b.status === StorageReplicaStatus.HEALTHY) - Number(a.status === StorageReplicaStatus.HEALTHY))) {
       if (!replica.remoteFileId || replica.status === StorageReplicaStatus.MISSING || replica.status === StorageReplicaStatus.CORRUPTED) continue;
       try {
@@ -90,14 +105,50 @@ export class VirtualDriveService {
         node.lastAccessedAt = new Date();
         await this.nodes.save(node);
         if (failures > 0) await this.audit.record(userId, 'REPLICA_FAILOVER', 'StorageObject', object.id, { selectedReplicaId: replica.id, failures });
+        if (object.encryptionAlgorithm) {
+          if (!object.encryptedDek || !object.dekIv || !object.dekAuthTag || !object.contentIv || !object.contentAuthTag || object.keyVersion == null || !object.encryptedChecksum || object.encryptedSize == null) {
+            throw new DataProtectionException('CORRUPTED_ENCRYPTED_OBJECT');
+          }
+          const outputPath = join(tmpdir(), 'cloudfusion-downloads', `${randomUUID()}.restored`);
+          await mkdir(dirname(outputPath), { recursive: true });
+          try {
+            await this.encryption.decryptFile(download.stream, outputPath, object.id, {
+              encryptedDek: object.encryptedDek,
+              dekIv: object.dekIv,
+              dekAuthTag: object.dekAuthTag,
+              keyVersion: object.keyVersion,
+              encryptionAlgorithm: object.encryptionAlgorithm as 'AES-256-GCM',
+              contentIv: object.contentIv,
+              contentAuthTag: object.contentAuthTag,
+              checksum: object.checksum,
+              encryptedChecksum: object.encryptedChecksum,
+              logicalSize: Number(object.size),
+              encryptedSize: Number(object.encryptedSize),
+            } satisfies DecryptionMetadata);
+            const plaintext = createReadStream(outputPath);
+            plaintext.once('close', () => void unlink(outputPath).catch(() => undefined));
+            return { stream: plaintext, fileName: node.name, mimeType: object.mimeType ?? download.mimeType, size: Number(object.size) };
+          } catch (error) {
+            await unlink(outputPath).catch(() => undefined);
+            throw error;
+          }
+        }
         return download;
       } catch (error) {
+        if (error instanceof DataProtectionException && ['KEY_UNAVAILABLE', 'KEY_VERSION_UNKNOWN'].includes(error.code)) throw error;
         failures += 1;
-        replica.status = StorageReplicaStatus.DEGRADED;
-        replica.lastError = error instanceof Error ? error.message : 'Replica download failed';
+        const integrityFailure = error instanceof DataProtectionException && [
+          'DECRYPTION_FAILED',
+          'INTEGRITY_CHECK_FAILED',
+          'CORRUPTED_ENCRYPTED_OBJECT',
+        ].includes(error.code);
+        if (error instanceof DataProtectionException) protectionError = error;
+        replica.status = integrityFailure ? StorageReplicaStatus.CORRUPTED : StorageReplicaStatus.DEGRADED;
+        replica.lastError = error instanceof DataProtectionException ? error.code : 'Replica download failed';
         await this.replicas.save(replica);
       }
     }
+    if (protectionError) throw protectionError;
     throw new ServiceUnavailableException('No healthy replica is available for this file');
   }
 
@@ -147,14 +198,42 @@ export class VirtualDriveService {
     const name = this.cleanName(file.originalname);
     await this.ensureAvailableName(userId, parent.id, name);
     const policy = await this.ensureDefaultPolicy(userId);
-    const checksum = await this.checksum(file.path);
+    const storageObjectId = randomUUID();
+    const encryptedDirectory = join(tmpdir(), 'cloudfusion-encrypted-uploads');
+    const encryptedPath = join(encryptedDirectory, `${storageObjectId}.cfdata`);
+    await mkdir(encryptedDirectory, { recursive: true });
+    let encrypted: Awaited<ReturnType<EncryptionService['encryptFile']>>;
+    try {
+      encrypted = await this.encryption.encryptFile(file.path, encryptedPath, storageObjectId);
+    } finally {
+      await unlink(file.path).catch(() => undefined);
+    }
+    if (encrypted.logicalSize !== file.size) {
+      await unlink(encryptedPath).catch(() => undefined);
+      throw new BadRequestException('Uploaded file size changed during encryption');
+    }
+    let handedToWorker = false;
+    try {
     const storageObject = await this.objects.save(this.objects.create({
+      id: storageObjectId,
       userId,
-      storageKey: `objects/${crypto.randomUUID()}`,
-      size: String(file.size),
+      storageKey: `objects/${storageObjectId}`,
+      size: String(encrypted.logicalSize),
+      encryptedSize: String(encrypted.encryptedSize),
       mimeType: file.mimetype || null,
-      checksum,
+      checksum: encrypted.checksum,
+      encryptedChecksum: encrypted.encryptedChecksum,
       checksumAlgorithm: 'SHA-256',
+      encryptionAlgorithm: encrypted.encryptionAlgorithm,
+      encryptedDek: encrypted.encryptedDek,
+      dekIv: encrypted.dekIv,
+      dekAuthTag: encrypted.dekAuthTag,
+      contentIv: encrypted.contentIv,
+      contentAuthTag: encrypted.contentAuthTag,
+      keyVersion: encrypted.keyVersion,
+      referenceCount: 1,
+      lifecycleStatus: 'ACTIVE',
+      gcAfter: null,
       status: StorageObjectStatus.UPLOADING,
       policyId: policy.id,
     }));
@@ -179,7 +258,6 @@ export class VirtualDriveService {
       node.status = VirtualNodeStatus.UNAVAILABLE;
       await this.objects.save(storageObject);
       await this.nodes.save(node);
-      await unlink(file.path).catch(() => undefined);
       await this.audit.record(userId, 'VIRTUAL_UPLOAD_UNAVAILABLE', 'VirtualNode', node.id, { reason: 'NO_CONNECTED_STORAGE_ACCOUNT' });
       return { node: this.toResponse(node), queued: false, replicas: 0, warning: 'Conecta al menos una cuenta cloud para guardar físicamente el archivo.' };
     }
@@ -190,8 +268,8 @@ export class VirtualDriveService {
       remoteFileId: null,
       remoteParentId: null,
       status: StorageReplicaStatus.PENDING,
-      size: String(file.size),
-      checksum,
+      size: String(encrypted.encryptedSize),
+      checksum: encrypted.encryptedChecksum,
       lastVerifiedAt: null,
       lastError: null,
       attempts: 0,
@@ -199,7 +277,8 @@ export class VirtualDriveService {
     let queued = true;
     for (const replica of replicaEntities) {
       try {
-        await this.queue.enqueue({ replicaId: replica.id, stagingPath: file.path });
+        await this.queue.enqueue({ replicaId: replica.id, stagingPath: encryptedPath });
+        handedToWorker = true;
       } catch (error) {
         queued = false;
         replica.status = StorageReplicaStatus.FAILED;
@@ -215,6 +294,9 @@ export class VirtualDriveService {
     }
     await this.audit.record(userId, 'VIRTUAL_UPLOAD_QUEUED', 'VirtualNode', node.id, { replicationFactor: replicaEntities.length });
     return { node: this.toResponse(node), queued, replicas: replicaEntities.length };
+    } finally {
+      if (!handedToWorker) await unlink(encryptedPath).catch(() => undefined);
+    }
   }
 
   async rename(userId: string, id: string, dto: UpdateVirtualNodeDto): Promise<VirtualNodeResponse> {
@@ -446,12 +528,6 @@ export class VirtualDriveService {
     const name = value.trim();
     if (!name || name === '.' || name === '..' || name.includes('/') || name.includes('\\')) throw new BadRequestException('Invalid virtual node name');
     return name;
-  }
-
-  private async checksum(path: string): Promise<string> {
-    const hash = createHash('sha256');
-    for await (const chunk of createReadStream(path)) hash.update(chunk as Buffer);
-    return hash.digest('hex');
   }
 
   private toResponse(node: VirtualNode): VirtualNodeResponse {

@@ -81,7 +81,7 @@ export class ReplicationWorkerService implements OnModuleInit, OnModuleDestroy {
       replica.remoteParentId = parent.id;
       replica.provider = context.account.provider;
       replica.size = String(uploaded.size ?? object.size);
-      replica.checksum = object.checksum;
+      replica.checksum = object.encryptedChecksum ?? object.checksum;
       replica.status = StorageReplicaStatus.HEALTHY;
       replica.lastVerifiedAt = new Date();
       await this.replicas.save(replica);

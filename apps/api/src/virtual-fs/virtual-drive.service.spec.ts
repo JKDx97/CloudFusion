@@ -40,9 +40,10 @@ function fixture() {
   const accounts = { list: jest.fn(), getOwnedAccount: jest.fn() };
   const queue = { enqueue: jest.fn() };
   const audit = { record: jest.fn() };
+  const encryption = { encryptFile: jest.fn(), decryptFile: jest.fn() };
   const config = { get: jest.fn((key: string) => key === 'virtualDrive.defaultReplicationFactor' ? 1 : undefined) };
-  const service = new VirtualDriveService(nodes as never, objects as never, replicas as never, policies as never, accounts as never, queue as never, audit as never, config as never);
-  return { service, nodes, objects, replicas, policies, accounts, queue, audit };
+  const service = new VirtualDriveService(nodes as never, objects as never, replicas as never, policies as never, accounts as never, queue as never, audit as never, config as never, encryption as never);
+  return { service, nodes, objects, replicas, policies, accounts, queue, audit, encryption };
 }
 
 describe('VirtualDriveService', () => {

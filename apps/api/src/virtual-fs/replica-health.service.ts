@@ -1,7 +1,7 @@
 import { Injectable, Logger, OnModuleDestroy, OnModuleInit } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createWriteStream } from 'node:fs';
 import { mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -17,6 +17,9 @@ import { ReplicationQueueService } from './replication-queue.service';
 import { pipeline } from 'node:stream/promises';
 import { CloudAccountStatus } from '../providers/common/cloud-provider.enum';
 import { StorageObjectStatus } from './enums/storage-object-status.enum';
+import { EncryptionService, DecryptionMetadata } from '../data-protection/encryption.service';
+import { DataProtectionException } from '../data-protection/data-protection-error';
+import { unlink } from 'node:fs/promises';
 
 @Injectable()
 export class ReplicaHealthService implements OnModuleInit, OnModuleDestroy {
@@ -31,6 +34,7 @@ export class ReplicaHealthService implements OnModuleInit, OnModuleDestroy {
     private readonly queue: ReplicationQueueService,
     private readonly audit: AuditService,
     private readonly config: ConfigService,
+    private readonly encryption: EncryptionService,
   ) {}
 
   onModuleInit(): void {
@@ -45,7 +49,7 @@ export class ReplicaHealthService implements OnModuleInit, OnModuleDestroy {
   async verify(replicaId: string, userId: string): Promise<StorageReplica> {
     const replica = await this.replicas.findOne({ where: { id: replicaId } });
     if (!replica) throw new Error('Replica not found');
-    const object = await this.objects.findOne({ where: { id: replica.storageObjectId, userId } });
+    const object = await this.loadProtectedObject(replica.storageObjectId, userId);
     if (!object) throw new Error('Replica not found');
     await this.verifyReplica(replica, object);
     return (await this.replicas.findOne({ where: { id: replica.id } })) ?? replica;
@@ -56,7 +60,7 @@ export class ReplicaHealthService implements OnModuleInit, OnModuleDestroy {
     const replicas = await this.replicas.find({ where: [{ status: StorageReplicaStatus.HEALTHY }, { status: StorageReplicaStatus.DEGRADED }] });
     for (const replica of replicas) {
       if (!replica.lastVerifiedAt || Date.now() - replica.lastVerifiedAt.getTime() >= interval) {
-        const object = await this.objects.findOne({ where: { id: replica.storageObjectId } });
+        const object = await this.loadProtectedObject(replica.storageObjectId);
         if (object) await this.verifyReplica(replica, object).catch((error) => this.logger.warn(`Replica verification failed: ${String(error)}`));
       }
     }
@@ -95,8 +99,8 @@ export class ReplicaHealthService implements OnModuleInit, OnModuleDestroy {
             remoteFileId: null,
             remoteParentId: null,
             status: StorageReplicaStatus.REPAIRING,
-            size: object.size,
-            checksum: object.checksum,
+            size: String(object.encryptedSize ?? object.size),
+            checksum: object.encryptedChecksum ?? object.checksum,
             lastVerifiedAt: null,
             lastError: null,
             attempts: 0,
@@ -118,18 +122,39 @@ export class ReplicaHealthService implements OnModuleInit, OnModuleDestroy {
       const context = await this.accounts.getAuthorizedAccount(object.userId, replica.cloudAccountId);
       if (!replica.remoteFileId) throw new Error('Replica has no remote file id');
       const remote = await context.adapter.getFile(context.accessToken, context.account.id, replica.remoteFileId);
-      if (remote.type !== 'file' || (remote.size != null && remote.size !== Number(object.size))) throw new Error('Remote replica size mismatch');
+      const expectedEncryptedSize = Number(object.encryptedSize ?? object.size);
+      if (remote.type !== 'file' || (remote.size != null && remote.size !== expectedEncryptedSize)) throw new Error('Remote replica size mismatch');
       const download = await context.adapter.downloadFile(context.accessToken, context.account.id, replica.remoteFileId);
-      const hash = createHash('sha256');
-      for await (const chunk of download.stream) hash.update(chunk as Buffer);
-      const checksum = hash.digest('hex');
-      if (checksum !== object.checksum) {
-        replica.status = StorageReplicaStatus.CORRUPTED;
-        replica.lastError = 'SHA-256 checksum mismatch';
-        await this.replicas.save(replica);
-        await this.audit.record(object.userId, 'REPLICA_CORRUPTED', 'StorageReplica', replica.id, { storageObjectId: object.id });
-        await this.queueRepair(replica, object);
-        return;
+      let checksum: string;
+      if (object.encryptionAlgorithm) {
+        if (!object.encryptedDek || !object.dekIv || !object.dekAuthTag || !object.contentIv || !object.contentAuthTag || object.keyVersion == null || !object.encryptedChecksum || object.encryptedSize == null) {
+          throw new DataProtectionException('CORRUPTED_ENCRYPTED_OBJECT');
+        }
+        const stagingPath = join(tmpdir(), 'cloudfusion-verify', `${randomUUID()}.restored`);
+        await mkdir(join(tmpdir(), 'cloudfusion-verify'), { recursive: true });
+        try {
+          await this.encryption.decryptFile(download.stream, stagingPath, object.id, {
+            encryptedDek: object.encryptedDek,
+            dekIv: object.dekIv,
+            dekAuthTag: object.dekAuthTag,
+            keyVersion: object.keyVersion,
+            encryptionAlgorithm: object.encryptionAlgorithm as 'AES-256-GCM',
+            contentIv: object.contentIv,
+            contentAuthTag: object.contentAuthTag,
+            checksum: object.checksum,
+            encryptedChecksum: object.encryptedChecksum,
+            logicalSize: Number(object.size),
+            encryptedSize: Number(object.encryptedSize),
+          } satisfies DecryptionMetadata);
+          checksum = object.encryptedChecksum;
+        } finally {
+          await unlink(stagingPath).catch(() => undefined);
+        }
+      } else {
+        const hash = createHash('sha256');
+        for await (const chunk of download.stream) hash.update(chunk as Buffer);
+        checksum = hash.digest('hex');
+        if (checksum !== object.checksum) throw new DataProtectionException('INTEGRITY_CHECK_FAILED');
       }
       replica.status = StorageReplicaStatus.HEALTHY;
       replica.size = String(remote.size ?? object.size);
@@ -139,12 +164,32 @@ export class ReplicaHealthService implements OnModuleInit, OnModuleDestroy {
       await this.replicas.save(replica);
       await this.audit.record(object.userId, 'REPLICA_VERIFIED', 'StorageReplica', replica.id, { storageObjectId: object.id });
     } catch (error) {
-      replica.status = StorageReplicaStatus.MISSING;
+      if (error instanceof DataProtectionException && ['KEY_UNAVAILABLE', 'KEY_VERSION_UNKNOWN'].includes(error.code)) throw error;
+      const corrupted = error instanceof DataProtectionException && [
+        'DECRYPTION_FAILED',
+        'INTEGRITY_CHECK_FAILED',
+        'CORRUPTED_ENCRYPTED_OBJECT',
+      ].includes(error.code);
+      replica.status = corrupted ? StorageReplicaStatus.CORRUPTED : StorageReplicaStatus.MISSING;
       replica.lastError = error instanceof Error ? error.message : 'Replica verification failed';
       await this.replicas.save(replica);
-      await this.audit.record(object.userId, 'REPLICA_MISSING', 'StorageReplica', replica.id, { storageObjectId: object.id });
+      await this.audit.record(object.userId, corrupted ? 'REPLICA_CORRUPTED' : 'REPLICA_MISSING', 'StorageReplica', replica.id, { storageObjectId: object.id });
       await this.queueRepair(replica, object);
     }
+  }
+
+  private async loadProtectedObject(id: string, userId?: string): Promise<StorageObject | null> {
+    const query = this.objects.createQueryBuilder('storageObject')
+      .addSelect([
+        'storageObject.encryptedDek',
+        'storageObject.dekIv',
+        'storageObject.dekAuthTag',
+        'storageObject.contentIv',
+        'storageObject.contentAuthTag',
+      ])
+      .where('storageObject.id = :id', { id });
+    if (userId) query.andWhere('storageObject.userId = :userId', { userId });
+    return query.getOne();
   }
 
   private async queueRepair(target: StorageReplica, object: StorageObject): Promise<void> {
