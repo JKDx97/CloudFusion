@@ -1,8 +1,10 @@
 import {
   BadRequestException,
+  ConflictException,
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
@@ -13,6 +15,7 @@ import { CloudProviderAdapter, ProviderTokenSet } from '../providers/common/clou
 import { ProviderException, ProviderErrorCode, providerHttpError } from '../providers/common/provider-error';
 import { OAuthStateService } from './services/oauth-state.service';
 import { TokenEncryptionService } from './services/token-encryption.service';
+import { AccountImpactService, CloudAccountImpact } from './account-impact.service';
 
 export interface CloudAccountPublic {
   id: string;
@@ -43,6 +46,7 @@ export class CloudAccountService {
     private readonly resolver: CloudProviderResolver,
     private readonly stateService: OAuthStateService,
     private readonly encryption: TokenEncryptionService,
+    @Optional() private readonly impact?: AccountImpactService,
   ) {}
 
   async list(userId: string): Promise<CloudAccountPublic[]> {
@@ -135,8 +139,17 @@ export class CloudAccountService {
     return this.toPublic(context.account);
   }
 
-  async disconnect(userId: string, accountId: string): Promise<{ disconnected: true }> {
+  async getDisconnectImpact(userId: string, accountId: string): Promise<CloudAccountImpact> {
+    if (!this.impact) return { accountId, replicas: 0, objectsOnlyOnThisAccount: 0, versionsAtRisk: 0, snapshotEntriesAtRisk: 0, activeBackupPolicies: 0, verifiedBackupsStored: 0, requiresConfirmation: false };
+    return this.impact.inspect(userId, accountId);
+  }
+
+  async disconnect(userId: string, accountId: string, confirmImpact = false): Promise<{ disconnected: true }> {
     const account = await this.getOwnedAccount(userId, accountId);
+    const impact = await this.getDisconnectImpact(userId, accountId);
+    if (impact.requiresConfirmation && !confirmImpact) {
+      throw new ConflictException({ code: 'ACCOUNT_IMPACT_CONFIRMATION_REQUIRED', impact });
+    }
     if (account.refreshTokenEncrypted) {
       try {
         await this.resolver.resolve(account.provider).revokeAuthorization(

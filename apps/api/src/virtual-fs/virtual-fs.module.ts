@@ -18,9 +18,10 @@ import { KeyRotationService } from '../data-protection/key-rotation.service';
 import { FileVersion } from './entities/file-version.entity';
 import { SnapshotEntry } from '../snapshots/entities/snapshot-entry.entity';
 import { StorageGarbageCollectorService } from './storage-garbage-collector.service';
+import { BackupCopy } from '../backups/entities/backup-copy.entity';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([VirtualNode, StorageObject, StorageReplica, StoragePolicy, FileVersion, SnapshotEntry]), ConfigModule, CloudAccountsModule, AuditModule],
+  imports: [TypeOrmModule.forFeature([VirtualNode, StorageObject, StorageReplica, StoragePolicy, FileVersion, SnapshotEntry, BackupCopy]), ConfigModule, CloudAccountsModule, AuditModule],
   controllers: [VirtualDriveController],
   providers: [
     {

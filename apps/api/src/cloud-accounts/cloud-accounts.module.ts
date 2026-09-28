@@ -8,11 +8,17 @@ import { TokenEncryptionService } from './services/token-encryption.service';
 import { GoogleDriveModule } from '../providers/google-drive/google-drive.module';
 import { OneDriveModule } from '../providers/onedrive/onedrive.module';
 import { CloudProviderResolver } from '../providers/common/cloud-provider-resolver.service';
+import { AccountImpactService } from './account-impact.service';
+import { StorageReplica } from '../virtual-fs/entities/storage-replica.entity';
+import { FileVersion } from '../virtual-fs/entities/file-version.entity';
+import { SnapshotEntry } from '../snapshots/entities/snapshot-entry.entity';
+import { BackupPolicy } from '../backups/entities/backup-policy.entity';
+import { BackupCopy } from '../backups/entities/backup-copy.entity';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([CloudAccount]), GoogleDriveModule, OneDriveModule],
+  imports: [TypeOrmModule.forFeature([CloudAccount, StorageReplica, FileVersion, SnapshotEntry, BackupPolicy, BackupCopy]), GoogleDriveModule, OneDriveModule],
   controllers: [CloudAccountsController],
-  providers: [CloudAccountService, TokenEncryptionService, OAuthStateService, CloudProviderResolver],
+  providers: [CloudAccountService, AccountImpactService, TokenEncryptionService, OAuthStateService, CloudProviderResolver],
   exports: [CloudAccountService, TokenEncryptionService, CloudProviderResolver],
 })
 export class CloudAccountsModule {}

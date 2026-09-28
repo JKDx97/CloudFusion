@@ -83,12 +83,21 @@ export class CloudAccountsController {
     return this.service.refresh(request.user.sub, id);
   }
 
+  @Get(':id/impact')
+  @UseGuards(AccessTokenGuard)
+  @ApiOperation({ summary: 'Show backups, versions and replicas affected by disconnecting a provider account' })
+  @ApiParam({ name: 'id', description: 'CloudFusion account UUID' })
+  disconnectImpact(@Req() request: AuthenticatedRequest, @Param('id') id: string) {
+    return this.service.getDisconnectImpact(request.user.sub, id);
+  }
+
   @Delete(':id')
   @UseGuards(AccessTokenGuard)
   @HttpCode(HttpStatus.OK)
   @ApiOperation({ summary: 'Disconnect a provider account' })
-  disconnect(@Req() request: AuthenticatedRequest, @Param('id') id: string) {
-    return this.service.disconnect(request.user.sub, id);
+  @ApiQuery({ name: 'confirmImpact', required: false, type: Boolean })
+  disconnect(@Req() request: AuthenticatedRequest, @Param('id') id: string, @Query('confirmImpact') confirmImpact?: string) {
+    return this.service.disconnect(request.user.sub, id, confirmImpact === 'true');
   }
 
   private async completeCallback(

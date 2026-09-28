@@ -12,6 +12,7 @@ import { SnapshotsService } from './snapshots.service';
 import { SnapshotRestoreQueueService, SNAPSHOT_RESTORE_QUEUE } from './snapshot-restore-queue.service';
 import { SnapshotRestoreWorkerService } from './snapshot-restore-worker.service';
 import { ConfigModule, ConfigService } from '@nestjs/config';
+import { SnapshotSchedulerService } from './snapshot-scheduler.service';
 
 @Module({
   imports: [TypeOrmModule.forFeature([Snapshot, SnapshotEntry, SnapshotRestoreJob, VirtualNode, FileVersion, StorageObject]), AuditModule, ConfigModule],
@@ -25,6 +26,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
     SnapshotRestoreQueueService,
     SnapshotRestoreWorkerService,
     SnapshotsService,
+    SnapshotSchedulerService,
   ],
   exports: [SnapshotsService],
 })

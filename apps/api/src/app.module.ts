@@ -23,6 +23,8 @@ import { StorageReplica } from './virtual-fs/entities/storage-replica.entity';
 import { StoragePolicy } from './virtual-fs/entities/storage-policy.entity';
 import { VirtualFsModule } from './virtual-fs/virtual-fs.module';
 import { SnapshotsModule } from './snapshots/snapshots.module';
+import { BackupsModule } from './backups/backups.module';
+import { ProtectionModule } from './protection/protection.module';
 
 @Module({
   imports: [
@@ -59,6 +61,8 @@ import { SnapshotsModule } from './snapshots/snapshots.module';
     AuditModule,
     VirtualFsModule,
     SnapshotsModule,
+    BackupsModule,
+    ProtectionModule,
   ],
   providers: [{ provide: APP_GUARD, useClass: ThrottlerGuard }],
 })
