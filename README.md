@@ -351,7 +351,8 @@ FileVersion → Snapshot → Backup → Recovery
 | Método | Ruta | Descripción |
 | --- | --- | --- |
 | GET/POST | `/virtual-drive/nodes/:id/versions` | Historial y nueva versión |
-| GET/POST | `/virtual-drive/nodes/:id/versions/:versionId/download` / `restore` | Descargar/restaurar una versión |
+| GET | `/virtual-drive/nodes/:id/versions/:versionId/download` | Descargar una versión histórica |
+| POST | `/virtual-drive/nodes/:id/versions/:versionId/restore` | Restaurar una versión como versión actual nueva |
 | GET/POST/DELETE | `/snapshots` y `/snapshots/:id` | Explorar, crear y eliminar snapshots no protegidos |
 | POST | `/snapshots/:id/restore` | Encolar restauración completa |
 | GET/POST/PATCH/DELETE | `/backup-policies` | Administrar programación, frecuencia, destino y retención |
