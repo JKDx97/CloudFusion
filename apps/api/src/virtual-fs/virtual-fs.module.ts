@@ -15,9 +15,10 @@ import { ReplicaHealthService } from './replica-health.service';
 import { EncryptionService } from '../data-protection/encryption.service';
 import { KeyManagementService } from '../data-protection/key-management.service';
 import { KeyRotationService } from '../data-protection/key-rotation.service';
+import { FileVersion } from './entities/file-version.entity';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([VirtualNode, StorageObject, StorageReplica, StoragePolicy]), ConfigModule, CloudAccountsModule, AuditModule],
+  imports: [TypeOrmModule.forFeature([VirtualNode, StorageObject, StorageReplica, StoragePolicy, FileVersion]), ConfigModule, CloudAccountsModule, AuditModule],
   controllers: [VirtualDriveController],
   providers: [
     {

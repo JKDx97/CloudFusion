@@ -65,6 +65,12 @@ export class VirtualDriveController {
     file.stream.pipe(response);
   }
 
+  @Get('nodes/:id/versions')
+  @ApiOperation({ summary: 'List the authenticated user’s file versions without exposing encryption metadata' })
+  versions(@Req() request: AuthenticatedRequest, @Param('id') id: string) {
+    return this.service.versionHistory(request.user.sub, id);
+  }
+
   @Post('folders')
   @ApiOperation({ summary: 'Create a metadata-only virtual folder' })
   folder(@Req() request: AuthenticatedRequest, @Body() dto: CreateVirtualFolderDto) { return this.service.createFolder(request.user.sub, dto); }

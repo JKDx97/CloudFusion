@@ -12,11 +12,12 @@ import { createReadStream } from 'node:fs';
 import { mkdir, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { DataSource, IsNull, Repository } from 'typeorm';
+import { DataSource, In, IsNull, Repository } from 'typeorm';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { AuditService } from '../audit/audit.service';
 import { CloudAccountService, CloudAccountPublic } from '../cloud-accounts/cloud-account.service';
 import { StorageObject } from './entities/storage-object.entity';
+import { FileVersion } from './entities/file-version.entity';
 import { StoragePolicy } from './entities/storage-policy.entity';
 import { StorageReplica } from './entities/storage-replica.entity';
 import { VirtualNode } from './entities/virtual-node.entity';
@@ -43,6 +44,7 @@ export interface VirtualNodeResponse {
   size: number | null;
   status: VirtualNodeStatus;
   storageObjectId: string | null;
+  currentVersionId: string | null;
   isRoot: boolean;
   isFavorite: boolean;
   deletedAt: Date | null;
@@ -68,6 +70,7 @@ export class VirtualDriveService {
     private readonly config: ConfigService,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly encryption: EncryptionService,
+    @InjectRepository(FileVersion) private readonly fileVersions: Repository<FileVersion>,
   ) {}
 
   async getRoot(userId: string): Promise<VirtualNodeResponse> {
@@ -220,6 +223,7 @@ export class VirtualDriveService {
       const created = await this.dataSource.transaction(async (manager) => {
         const objectRepository = manager.getRepository(StorageObject);
         const nodeRepository = manager.getRepository(VirtualNode);
+        const versionRepository = manager.getRepository(FileVersion);
         const lockKey = `${userId}:${encrypted.checksum}:${encrypted.logicalSize}`;
         await manager.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [lockKey]);
         const existing = await objectRepository.createQueryBuilder('storageObject')
@@ -248,6 +252,17 @@ export class VirtualDriveService {
             isFavorite: false,
             lastAccessedAt: null,
           }));
+          const version = await versionRepository.save(versionRepository.create({
+            virtualNodeId: sharedNode.id,
+            storageObjectId: sharedObject.id,
+            versionNumber: 1,
+            size: String(encrypted.logicalSize),
+            checksum: encrypted.checksum,
+            createdBy: userId,
+            comment: null,
+          }));
+          sharedNode.currentVersionId = version.id;
+          await nodeRepository.save(sharedNode);
           return { storageObject: sharedObject, node: sharedNode, deduplicated: true };
         }
 
@@ -289,6 +304,17 @@ export class VirtualDriveService {
           isFavorite: false,
           lastAccessedAt: null,
         }));
+        const version = await versionRepository.save(versionRepository.create({
+          virtualNodeId: node.id,
+          storageObjectId: storageObject.id,
+          versionNumber: 1,
+          size: String(encrypted.logicalSize),
+          checksum: encrypted.checksum,
+          createdBy: userId,
+          comment: null,
+        }));
+        node.currentVersionId = version.id;
+        await nodeRepository.save(node);
         return { storageObject, node, deduplicated: false };
       });
 
@@ -412,18 +438,20 @@ export class VirtualDriveService {
     const unusedObjectIds = await this.dataSource.transaction(async (manager) => {
       const objectRepository = manager.getRepository(StorageObject);
       const nodeRepository = manager.getRepository(VirtualNode);
+      const versionRepository = manager.getRepository(FileVersion);
       for (const objectId of objectIds) {
         await objectRepository.createQueryBuilder('storageObject')
           .setLock('pessimistic_write')
           .where('storageObject.id = :objectId AND storageObject.userId = :userId', { objectId, userId })
           .getOne();
       }
+      await versionRepository.delete({ virtualNodeId: In(all.map((item) => item.id)) });
       await nodeRepository.delete(all.map((item) => item.id));
       const unused: string[] = [];
       for (const objectId of objectIds) {
         const object = await objectRepository.findOne({ where: { id: objectId, userId } });
         if (!object) continue;
-        const remainingReferences = await nodeRepository.count({ where: { storageObjectId: objectId } });
+        const remainingReferences = await versionRepository.count({ where: { storageObjectId: objectId } });
         object.referenceCount = remainingReferences;
         if (remainingReferences === 0) {
           object.lifecycleStatus = 'DELETING';
@@ -457,6 +485,29 @@ export class VirtualDriveService {
   async recent(userId: string): Promise<VirtualNodeResponse[]> {
     const nodes = await this.nodes.find({ where: { userId, deletedAt: IsNull() }, order: { lastAccessedAt: 'DESC', updatedAt: 'DESC' }, take: 50 });
     return nodes.filter((node) => !node.isRoot && node.lastAccessedAt).map((node) => this.toResponse(node));
+  }
+
+  async versionHistory(userId: string, id: string): Promise<Array<{
+    id: string;
+    versionNumber: number;
+    size: number;
+    checksum: string;
+    createdAt: Date;
+    comment: string | null;
+    current: boolean;
+  }>> {
+    const node = await this.findOwned(id, userId);
+    if (node.type !== VirtualNodeType.FILE) throw new BadRequestException('Version history is only available for files');
+    const versions = await this.fileVersions.find({ where: { virtualNodeId: node.id }, order: { versionNumber: 'DESC' } });
+    return versions.map((version) => ({
+      id: version.id,
+      versionNumber: version.versionNumber,
+      size: Number(version.size),
+      checksum: version.checksum,
+      createdAt: version.createdAt,
+      comment: version.comment,
+      current: version.id === node.currentVersionId,
+    }));
   }
 
   async favorites(userId: string): Promise<VirtualNodeResponse[]> {
@@ -613,6 +664,7 @@ export class VirtualDriveService {
       size: node.size == null ? null : Number(node.size),
       status: node.status,
       storageObjectId: node.storageObjectId,
+      currentVersionId: node.currentVersionId,
       isRoot: node.isRoot,
       isFavorite: node.isFavorite,
       deletedAt: node.deletedAt,

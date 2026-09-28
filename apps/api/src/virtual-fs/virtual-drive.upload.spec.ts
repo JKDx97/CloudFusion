@@ -6,6 +6,7 @@ import { VirtualNode } from './entities/virtual-node.entity';
 import { StorageObject } from './entities/storage-object.entity';
 import { StorageReplica } from './entities/storage-replica.entity';
 import { StoragePolicy } from './entities/storage-policy.entity';
+import { FileVersion } from './entities/file-version.entity';
 import { VirtualNodeStatus } from './enums/virtual-node-status.enum';
 import { VirtualNodeType } from './enums/virtual-node-type.enum';
 import { CloudProvider } from '../providers/common/cloud-provider.enum';
@@ -28,6 +29,7 @@ describe('VirtualDriveService protected upload', () => {
     const root = {
       id: 'root-id', userId: 'owner', parentId: null, name: 'Mi Drive', type: VirtualNodeType.FOLDER,
       mimeType: 'inode/directory', size: null, status: VirtualNodeStatus.AVAILABLE, storageObjectId: null,
+      currentVersionId: null,
       deletedAt: null, previousParentId: null, isRoot: true, isFavorite: false, lastAccessedAt: null,
       createdAt: new Date(), updatedAt: new Date(),
     } as VirtualNode;
@@ -45,6 +47,10 @@ describe('VirtualDriveService protected upload', () => {
         andWhere: jest.fn().mockReturnThis(),
         getOne: jest.fn().mockResolvedValue(null),
       })),
+    };
+    const versions = {
+      create: jest.fn((value: unknown) => value),
+      save: jest.fn(async (value: Record<string, unknown>) => ({ ...value, id: 'version-1', createdAt: new Date() })),
     };
     const replicas = {
       create: jest.fn((value: Partial<StorageReplica>) => value),
@@ -66,7 +72,7 @@ describe('VirtualDriveService protected upload', () => {
     const dataSource = {
       transaction: jest.fn(async (callback: (manager: unknown) => Promise<unknown>) => callback({
         query: advisoryLock,
-        getRepository: (entity: unknown) => entity === StorageObject ? objects : nodes,
+        getRepository: (entity: unknown) => entity === StorageObject ? objects : entity === FileVersion ? versions : nodes,
       })),
     };
     const encryptedPayload = Buffer.from('ciphertext only');
@@ -83,7 +89,7 @@ describe('VirtualDriveService protected upload', () => {
     };
     const service = new VirtualDriveService(
       nodes as never, objects as never, replicas as never, policies as never,
-      accounts as never, queue as never, audit as never, config as never, dataSource as never, encryption as never,
+      accounts as never, queue as never, audit as never, config as never, dataSource as never, encryption as never, versions as never,
     );
     const plaintextPath = join(directory, 'plain.pdf');
     await writeFile(plaintextPath, 'clear content');
@@ -102,6 +108,7 @@ describe('VirtualDriveService protected upload', () => {
       checksum: 'plain-checksum', encryptedChecksum: 'cipher-checksum',
       encryptedDek: 'wrapped-key', encryptionAlgorithm: 'AES-256-GCM',
     }));
+    expect(versions.save).toHaveBeenCalledWith(expect.objectContaining({ versionNumber: 1, checksum: 'plain-checksum', createdBy: 'owner' }));
     await expect(readFile(plaintextPath)).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
@@ -109,6 +116,7 @@ describe('VirtualDriveService protected upload', () => {
     const root = {
       id: 'root-id', userId: 'owner', parentId: null, name: 'Mi Drive', type: VirtualNodeType.FOLDER,
       mimeType: 'inode/directory', size: null, status: VirtualNodeStatus.AVAILABLE, storageObjectId: null,
+      currentVersionId: null,
       deletedAt: null, previousParentId: null, isRoot: true, isFavorite: false, lastAccessedAt: null,
       createdAt: new Date(), updatedAt: new Date(),
     } as VirtualNode;
@@ -133,6 +141,10 @@ describe('VirtualDriveService protected upload', () => {
       save: jest.fn(async (value: StorageObject) => value),
       create: jest.fn(),
     };
+    const versions = {
+      create: jest.fn((value: unknown) => value),
+      save: jest.fn(async (value: Record<string, unknown>) => ({ ...value, id: 'duplicate-version', createdAt: new Date() })),
+    };
     const replicas = { count: jest.fn().mockResolvedValue(2) };
     const policies = { findOne: jest.fn().mockResolvedValue({ id: 'policy-id', replicationFactor: 1 }) };
     const accounts = { list: jest.fn() };
@@ -143,7 +155,7 @@ describe('VirtualDriveService protected upload', () => {
     const dataSource = {
       transaction: jest.fn(async (callback: (manager: unknown) => Promise<unknown>) => callback({
         query: advisoryLock,
-        getRepository: (entity: unknown) => entity === StorageObject ? objects : nodes,
+        getRepository: (entity: unknown) => entity === StorageObject ? objects : entity === FileVersion ? versions : nodes,
       })),
     };
     const encryption = {
@@ -160,7 +172,7 @@ describe('VirtualDriveService protected upload', () => {
     };
     const service = new VirtualDriveService(
       nodes as never, objects as never, replicas as never, policies as never,
-      accounts as never, queue as never, audit as never, config as never, dataSource as never, encryption as never,
+      accounts as never, queue as never, audit as never, config as never, dataSource as never, encryption as never, versions as never,
     );
     const plaintextPath = join(directory, 'copy.pdf');
     await writeFile(plaintextPath, 'clear content');
@@ -174,6 +186,7 @@ describe('VirtualDriveService protected upload', () => {
     expect(advisoryLock).toHaveBeenCalledWith(expect.stringContaining('pg_advisory_xact_lock'), ['owner:plain-checksum:13']);
     expect(objects.save).toHaveBeenCalledWith(expect.objectContaining({ id: 'shared-object', referenceCount: 2 }));
     expect(nodes.save).toHaveBeenCalledWith(expect.objectContaining({ storageObjectId: 'shared-object', name: 'copy.pdf' }));
+    expect(versions.save).toHaveBeenCalledWith(expect.objectContaining({ virtualNodeId: 'duplicate-node', storageObjectId: 'shared-object', versionNumber: 1 }));
     expect(objects.create).not.toHaveBeenCalled();
     expect(accounts.list).not.toHaveBeenCalled();
     expect(queue.enqueue).not.toHaveBeenCalled();

@@ -44,6 +44,9 @@ export class VirtualNode {
   @Column({ name: 'storage_object_id', type: 'uuid', nullable: true })
   storageObjectId!: string | null;
 
+  @Column({ name: 'current_version_id', type: 'uuid', nullable: true })
+  currentVersionId!: string | null;
+
   @Column({ name: 'deleted_at', type: 'timestamptz', nullable: true })
   deletedAt!: Date | null;
 
