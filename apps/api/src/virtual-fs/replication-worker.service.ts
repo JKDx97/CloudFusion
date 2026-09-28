@@ -106,7 +106,7 @@ export class ReplicationWorkerService implements OnModuleInit, OnModuleDestroy {
         await context.adapter.deleteItem(context.accessToken, context.account.id, replica.remoteFileId);
       }
       await this.replicas.delete(replica.id);
-      await this.finalizeDeletedTree(object.userId, job.data.rootNodeId ?? '', object.id);
+      await this.finalizeDeletedObject(object.userId, object.id);
       await this.audit.record(object.userId, 'REPLICA_DELETED', 'StorageReplica', replica.id, { storageObjectId: object.id });
     } catch (error) {
       replica.status = StorageReplicaStatus.FAILED;
@@ -116,23 +116,11 @@ export class ReplicationWorkerService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  private async finalizeDeletedTree(userId: string, rootNodeId: string, objectId: string): Promise<void> {
-    const root = await this.nodes.findOne({ where: { id: rootNodeId || undefined, userId } });
-    if (!root) return;
-    const tree = [root, ...(await this.collectNodes(userId, root.id))];
-    const objectIds = [...new Set(tree.map((node) => node.storageObjectId).filter((id): id is string => Boolean(id)))];
-    if (!objectIds.includes(objectId)) objectIds.push(objectId);
-    const pending = await this.replicas.find({ where: objectIds.map((id) => ({ storageObjectId: id })) });
-    if (pending.length > 0) return;
-    await this.objects.delete(objectIds);
-    await this.nodes.delete(tree.map((node) => node.id));
-  }
-
-  private async collectNodes(userId: string, parentId: string): Promise<VirtualNode[]> {
-    const children = await this.nodes.find({ where: { userId, parentId } });
-    const result: VirtualNode[] = [];
-    for (const child of children) result.push(child, ...(await this.collectNodes(userId, child.id)));
-    return result;
+  private async finalizeDeletedObject(userId: string, objectId: string): Promise<void> {
+    const object = await this.objects.findOne({ where: { id: objectId, userId } });
+    if (!object || object.referenceCount > 0 || object.lifecycleStatus !== 'DELETING') return;
+    const replicas = await this.replicas.count({ where: { storageObjectId: objectId } });
+    if (replicas === 0) await this.objects.delete(objectId);
   }
 
   private async ensureManagedObjectsFolder(accessToken: string, accountId: string, adapter: import('../providers/common/cloud-provider.interface').CloudProviderAdapter): Promise<{ id: string }> {
@@ -151,11 +139,12 @@ export class ReplicationWorkerService implements OnModuleInit, OnModuleDestroy {
     const required = policy?.replicationFactor ?? 1;
     object.status = healthy >= required ? StorageObjectStatus.AVAILABLE : healthy > 0 ? StorageObjectStatus.DEGRADED : StorageObjectStatus.ERROR;
     await this.objects.save(object);
-    const node = await this.nodes.findOne({ where: { storageObjectId: object.id } });
-    if (node) {
-      node.status = object.status === StorageObjectStatus.AVAILABLE ? VirtualNodeStatus.AVAILABLE : object.status === StorageObjectStatus.DEGRADED ? VirtualNodeStatus.DEGRADED : VirtualNodeStatus.ERROR;
-      await this.nodes.save(node);
-    }
+    const nodeStatus = object.status === StorageObjectStatus.AVAILABLE
+      ? VirtualNodeStatus.AVAILABLE
+      : object.status === StorageObjectStatus.DEGRADED
+        ? VirtualNodeStatus.DEGRADED
+        : VirtualNodeStatus.ERROR;
+    await this.nodes.update({ storageObjectId: object.id }, { status: nodeStatus });
   }
 
   private async cleanupStaging(objectId: string, stagingPath: string): Promise<void> {

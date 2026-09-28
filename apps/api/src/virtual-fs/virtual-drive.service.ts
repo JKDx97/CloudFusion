@@ -12,7 +12,8 @@ import { createReadStream } from 'node:fs';
 import { mkdir, unlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { IsNull, Repository } from 'typeorm';
+import { DataSource, IsNull, Repository } from 'typeorm';
+import { InjectDataSource } from '@nestjs/typeorm';
 import { AuditService } from '../audit/audit.service';
 import { CloudAccountService, CloudAccountPublic } from '../cloud-accounts/cloud-account.service';
 import { StorageObject } from './entities/storage-object.entity';
@@ -65,6 +66,7 @@ export class VirtualDriveService {
     private readonly queue: ReplicationQueueService,
     private readonly audit: AuditService,
     private readonly config: ConfigService,
+    @InjectDataSource() private readonly dataSource: DataSource,
     private readonly encryption: EncryptionService,
   ) {}
 
@@ -190,6 +192,7 @@ export class VirtualDriveService {
     node: VirtualNodeResponse;
     queued: boolean;
     replicas: number;
+    deduplicated?: boolean;
     warning?: string;
   }> {
     if (!file) throw new BadRequestException('A file is required');
@@ -214,86 +217,130 @@ export class VirtualDriveService {
     }
     let handedToWorker = false;
     try {
-    const storageObject = await this.objects.save(this.objects.create({
-      id: storageObjectId,
-      userId,
-      storageKey: `objects/${storageObjectId}`,
-      size: String(encrypted.logicalSize),
-      encryptedSize: String(encrypted.encryptedSize),
-      mimeType: file.mimetype || null,
-      checksum: encrypted.checksum,
-      encryptedChecksum: encrypted.encryptedChecksum,
-      checksumAlgorithm: 'SHA-256',
-      encryptionAlgorithm: encrypted.encryptionAlgorithm,
-      encryptedDek: encrypted.encryptedDek,
-      dekIv: encrypted.dekIv,
-      dekAuthTag: encrypted.dekAuthTag,
-      contentIv: encrypted.contentIv,
-      contentAuthTag: encrypted.contentAuthTag,
-      keyVersion: encrypted.keyVersion,
-      referenceCount: 1,
-      lifecycleStatus: 'ACTIVE',
-      gcAfter: null,
-      status: StorageObjectStatus.UPLOADING,
-      policyId: policy.id,
-    }));
-    const node = await this.nodes.save(this.nodes.create({
-      userId,
-      parentId: parent.id,
-      name,
-      type: VirtualNodeType.FILE,
-      mimeType: file.mimetype || null,
-      size: String(file.size),
-      status: VirtualNodeStatus.UPLOADING,
-      storageObjectId: storageObject.id,
-      deletedAt: null,
-      previousParentId: null,
-      isRoot: false,
-      isFavorite: false,
-      lastAccessedAt: null,
-    }));
-    const destinations = this.selectDestinations(await this.accounts.list(userId), policy.replicationFactor, file.size);
-    if (destinations.length === 0) {
-      storageObject.status = StorageObjectStatus.UNAVAILABLE;
-      node.status = VirtualNodeStatus.UNAVAILABLE;
-      await this.objects.save(storageObject);
-      await this.nodes.save(node);
-      await this.audit.record(userId, 'VIRTUAL_UPLOAD_UNAVAILABLE', 'VirtualNode', node.id, { reason: 'NO_CONNECTED_STORAGE_ACCOUNT' });
-      return { node: this.toResponse(node), queued: false, replicas: 0, warning: 'Conecta al menos una cuenta cloud para guardar físicamente el archivo.' };
-    }
-    const replicaEntities = await this.replicas.save(destinations.map((account) => this.replicas.create({
-      storageObjectId: storageObject.id,
-      cloudAccountId: account.id,
-      provider: account.provider,
-      remoteFileId: null,
-      remoteParentId: null,
-      status: StorageReplicaStatus.PENDING,
-      size: String(encrypted.encryptedSize),
-      checksum: encrypted.encryptedChecksum,
-      lastVerifiedAt: null,
-      lastError: null,
-      attempts: 0,
-    })));
-    let queued = true;
-    for (const replica of replicaEntities) {
-      try {
-        await this.queue.enqueue({ replicaId: replica.id, stagingPath: encryptedPath });
-        handedToWorker = true;
-      } catch (error) {
-        queued = false;
-        replica.status = StorageReplicaStatus.FAILED;
-        replica.lastError = error instanceof Error ? error.message : 'Replication queue unavailable';
-        await this.replicas.save(replica);
+      const created = await this.dataSource.transaction(async (manager) => {
+        const objectRepository = manager.getRepository(StorageObject);
+        const nodeRepository = manager.getRepository(VirtualNode);
+        const lockKey = `${userId}:${encrypted.checksum}:${encrypted.logicalSize}`;
+        await manager.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [lockKey]);
+        const existing = await objectRepository.createQueryBuilder('storageObject')
+          .setLock('pessimistic_write')
+          .where('storageObject.userId = :userId', { userId })
+          .andWhere('storageObject.checksum = :checksum', { checksum: encrypted.checksum })
+          .andWhere('storageObject.size = :size', { size: String(encrypted.logicalSize) })
+          .andWhere('storageObject.encryptionAlgorithm IS NOT NULL')
+          .andWhere('storageObject.lifecycleStatus = :lifecycleStatus', { lifecycleStatus: 'ACTIVE' })
+          .getOne();
+        if (existing) {
+          existing.referenceCount += 1;
+          const sharedObject = await objectRepository.save(existing);
+          const sharedNode = await nodeRepository.save(nodeRepository.create({
+            userId,
+            parentId: parent.id,
+            name,
+            type: VirtualNodeType.FILE,
+            mimeType: file.mimetype || null,
+            size: String(file.size),
+            status: sharedObject.status as unknown as VirtualNodeStatus,
+            storageObjectId: sharedObject.id,
+            deletedAt: null,
+            previousParentId: null,
+            isRoot: false,
+            isFavorite: false,
+            lastAccessedAt: null,
+          }));
+          return { storageObject: sharedObject, node: sharedNode, deduplicated: true };
+        }
+
+        const storageObject = await objectRepository.save(objectRepository.create({
+          id: storageObjectId,
+          userId,
+          storageKey: `objects/${storageObjectId}`,
+          size: String(encrypted.logicalSize),
+          encryptedSize: String(encrypted.encryptedSize),
+          mimeType: file.mimetype || null,
+          checksum: encrypted.checksum,
+          encryptedChecksum: encrypted.encryptedChecksum,
+          checksumAlgorithm: 'SHA-256',
+          encryptionAlgorithm: encrypted.encryptionAlgorithm,
+          encryptedDek: encrypted.encryptedDek,
+          dekIv: encrypted.dekIv,
+          dekAuthTag: encrypted.dekAuthTag,
+          contentIv: encrypted.contentIv,
+          contentAuthTag: encrypted.contentAuthTag,
+          keyVersion: encrypted.keyVersion,
+          referenceCount: 1,
+          lifecycleStatus: 'ACTIVE',
+          gcAfter: null,
+          status: StorageObjectStatus.UPLOADING,
+          policyId: policy.id,
+        }));
+        const node = await nodeRepository.save(nodeRepository.create({
+          userId,
+          parentId: parent.id,
+          name,
+          type: VirtualNodeType.FILE,
+          mimeType: file.mimetype || null,
+          size: String(file.size),
+          status: VirtualNodeStatus.UPLOADING,
+          storageObjectId: storageObject.id,
+          deletedAt: null,
+          previousParentId: null,
+          isRoot: false,
+          isFavorite: false,
+          lastAccessedAt: null,
+        }));
+        return { storageObject, node, deduplicated: false };
+      });
+
+      const { storageObject, node } = created;
+      if (created.deduplicated) {
+        const replicaCount = await this.replicas.count({ where: { storageObjectId: storageObject.id } });
+        await this.audit.record(userId, 'VIRTUAL_UPLOAD_DEDUPLICATED', 'VirtualNode', node.id, { storageObjectId: storageObject.id });
+        return { node: this.toResponse(node), queued: false, replicas: replicaCount, deduplicated: true };
       }
-    }
-    if (!queued) {
-      node.status = VirtualNodeStatus.DEGRADED;
-      storageObject.status = StorageObjectStatus.DEGRADED;
-      await this.nodes.save(node);
-      await this.objects.save(storageObject);
-    }
-    await this.audit.record(userId, 'VIRTUAL_UPLOAD_QUEUED', 'VirtualNode', node.id, { replicationFactor: replicaEntities.length });
-    return { node: this.toResponse(node), queued, replicas: replicaEntities.length };
+
+      const destinations = this.selectDestinations(await this.accounts.list(userId), policy.replicationFactor, file.size);
+      if (destinations.length === 0) {
+        storageObject.status = StorageObjectStatus.UNAVAILABLE;
+        node.status = VirtualNodeStatus.UNAVAILABLE;
+        await this.objects.save(storageObject);
+        await this.nodes.save(node);
+        await this.audit.record(userId, 'VIRTUAL_UPLOAD_UNAVAILABLE', 'VirtualNode', node.id, { reason: 'NO_CONNECTED_STORAGE_ACCOUNT' });
+        return { node: this.toResponse(node), queued: false, replicas: 0, warning: 'Conecta al menos una cuenta cloud para guardar físicamente el archivo.' };
+      }
+      const replicaEntities = await this.replicas.save(destinations.map((account) => this.replicas.create({
+        storageObjectId: storageObject.id,
+        cloudAccountId: account.id,
+        provider: account.provider,
+        remoteFileId: null,
+        remoteParentId: null,
+        status: StorageReplicaStatus.PENDING,
+        size: String(encrypted.encryptedSize),
+        checksum: encrypted.encryptedChecksum,
+        lastVerifiedAt: null,
+        lastError: null,
+        attempts: 0,
+      })));
+      let queued = true;
+      for (const replica of replicaEntities) {
+        try {
+          await this.queue.enqueue({ replicaId: replica.id, stagingPath: encryptedPath });
+          handedToWorker = true;
+        } catch (error) {
+          queued = false;
+          replica.status = StorageReplicaStatus.FAILED;
+          replica.lastError = error instanceof Error ? error.message : 'Replication queue unavailable';
+          await this.replicas.save(replica);
+        }
+      }
+      if (!queued) {
+        node.status = VirtualNodeStatus.DEGRADED;
+        storageObject.status = StorageObjectStatus.DEGRADED;
+        await this.nodes.save(node);
+        await this.objects.save(storageObject);
+      }
+      await this.audit.record(userId, 'VIRTUAL_UPLOAD_QUEUED', 'VirtualNode', node.id, { replicationFactor: replicaEntities.length });
+      return { node: this.toResponse(node), queued, replicas: replicaEntities.length };
     } finally {
       if (!handedToWorker) await unlink(encryptedPath).catch(() => undefined);
     }
@@ -361,31 +408,49 @@ export class VirtualDriveService {
     if (!node.deletedAt) throw new BadRequestException('Only trashed nodes can be permanently deleted');
     const descendants = await this.collectTree(userId, node, true);
     const all = [node, ...descendants];
-    const objectIds = all.map((item) => item.storageObjectId).filter((value): value is string => Boolean(value));
-    const physicalReplicas = objectIds.length ? await this.replicas.find({ where: objectIds.map((storageObjectId) => ({ storageObjectId })) }) : [];
-    if (physicalReplicas.length === 0) {
-      if (objectIds.length) await this.objects.delete(objectIds);
-      await this.nodes.delete(all.map((item) => item.id));
-      await this.audit.record(userId, 'VIRTUAL_NODE_PERMANENTLY_DELETED', 'VirtualNode', id, { descendants: descendants.length, queued: false });
-      return { deleted: true };
-    }
-    for (const item of all) {
-      item.status = VirtualNodeStatus.DELETING;
-      await this.nodes.save(item);
-    }
-    for (const objectId of objectIds) {
-      const object = await this.objects.findOne({ where: { id: objectId, userId } });
-      if (object) {
-        object.status = StorageObjectStatus.DELETING;
-        await this.objects.save(object);
+    const objectIds = [...new Set(all.map((item) => item.storageObjectId).filter((value): value is string => Boolean(value)))];
+    const unusedObjectIds = await this.dataSource.transaction(async (manager) => {
+      const objectRepository = manager.getRepository(StorageObject);
+      const nodeRepository = manager.getRepository(VirtualNode);
+      for (const objectId of objectIds) {
+        await objectRepository.createQueryBuilder('storageObject')
+          .setLock('pessimistic_write')
+          .where('storageObject.id = :objectId AND storageObject.userId = :userId', { objectId, userId })
+          .getOne();
       }
-    }
+      await nodeRepository.delete(all.map((item) => item.id));
+      const unused: string[] = [];
+      for (const objectId of objectIds) {
+        const object = await objectRepository.findOne({ where: { id: objectId, userId } });
+        if (!object) continue;
+        const remainingReferences = await nodeRepository.count({ where: { storageObjectId: objectId } });
+        object.referenceCount = remainingReferences;
+        if (remainingReferences === 0) {
+          object.lifecycleStatus = 'DELETING';
+          object.status = StorageObjectStatus.DELETING;
+          unused.push(objectId);
+        }
+        await objectRepository.save(object);
+      }
+      return unused;
+    });
+
+    const physicalReplicas = unusedObjectIds.length
+      ? await this.replicas.find({ where: unusedObjectIds.map((storageObjectId) => ({ storageObjectId })) })
+      : [];
+    const replicatedObjects = new Set(physicalReplicas.map((replica) => replica.storageObjectId));
+    const objectsWithoutReplicas = unusedObjectIds.filter((objectId) => !replicatedObjects.has(objectId));
+    if (objectsWithoutReplicas.length) await this.objects.delete(objectsWithoutReplicas);
     for (const replica of physicalReplicas) {
       replica.status = StorageReplicaStatus.DELETING;
       await this.replicas.save(replica);
-      await this.queue.enqueue({ replicaId: replica.id, action: 'DELETE', rootNodeId: node.id });
+      await this.queue.enqueue({ replicaId: replica.id, action: 'DELETE' });
     }
-    await this.audit.record(userId, 'VIRTUAL_NODE_PERMANENT_DELETE_QUEUED', 'VirtualNode', id, { descendants: descendants.length, replicas: physicalReplicas.length });
+    await this.audit.record(userId, physicalReplicas.length ? 'VIRTUAL_NODE_PERMANENT_DELETE_QUEUED' : 'VIRTUAL_NODE_PERMANENTLY_DELETED', 'VirtualNode', id, {
+      descendants: descendants.length,
+      replicas: physicalReplicas.length,
+      retainedSharedObjects: objectIds.length - unusedObjectIds.length,
+    });
     return { deleted: true };
   }
 
@@ -416,17 +481,24 @@ export class VirtualDriveService {
     logicalBytes: number;
     physicalBytes: number;
     logicalFiles: number;
+    deduplicatedBytes: number;
+    deduplicatedFiles: number;
     replicas: number;
     healthyReplicas: number;
     degradedObjects: number;
   }> {
-    const objects = await this.objects.find({ where: { userId } });
-    const objectIds = objects.map((object) => object.id);
+    const files = await this.nodes.find({ where: { userId, type: VirtualNodeType.FILE, deletedAt: IsNull() } });
+    const objectIds = [...new Set(files.map((file) => file.storageObjectId).filter((value): value is string => Boolean(value)))];
+    const objects = objectIds.length ? await this.objects.find({ where: objectIds.map((id) => ({ id, userId })) }) : [];
     const replicas = objectIds.length ? await this.replicas.find({ where: objectIds.map((storageObjectId) => ({ storageObjectId })) }) : [];
+    const logicalBytes = files.reduce((sum, file) => sum + Number(file.size ?? 0), 0);
+    const uniqueBytes = objects.reduce((sum, object) => sum + Number(object.size), 0);
     return {
-      logicalBytes: objects.reduce((sum, object) => sum + Number(object.size), 0),
+      logicalBytes,
       physicalBytes: replicas.filter((replica) => Boolean(replica.remoteFileId)).reduce((sum, replica) => sum + Number(replica.size ?? 0), 0),
-      logicalFiles: objects.length,
+      logicalFiles: files.length,
+      deduplicatedBytes: Math.max(0, logicalBytes - uniqueBytes),
+      deduplicatedFiles: Math.max(0, files.length - objectIds.length),
       replicas: replicas.length,
       healthyReplicas: replicas.filter((replica) => replica.status === StorageReplicaStatus.HEALTHY).length,
       degradedObjects: objects.filter((object) => object.status !== StorageObjectStatus.AVAILABLE).length,
