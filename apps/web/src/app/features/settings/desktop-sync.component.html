@@ -82,6 +82,25 @@
       </section>
 
       <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+        <div class="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
+          <div>
+            <h2 class="font-semibold">Copias locales para P2P</h2>
+            <p class="mt-1 max-w-2xl text-sm leading-6 text-slate-600">Analiza las carpetas observadas por bloques y prepara un índice SHA-256 local. No sube contenido, rutas ni huellas al servidor; el índice se conserva solo en memoria.</p>
+          </div>
+          <button type="button" (click)="indexLocalFiles()" [disabled]="indexingBusy() || !roots().length" class="shrink-0 rounded-xl border border-indigo-200 px-4 py-2.5 text-sm font-semibold text-indigo-700 hover:bg-indigo-50 disabled:opacity-50">
+            {{ indexingBusy() ? 'Analizando archivos…' : 'Analizar copias locales' }}
+          </button>
+        </div>
+        @if (indexNotice()) {
+          <p role="status" class="mt-4 rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-600">{{ indexNotice() }}</p>
+        }
+        @if (indexedFileCount() !== null) {
+          <p class="mt-3 text-xs text-slate-500">Detecta hasta 50&nbsp;000 archivos regulares. Los cambios en las carpetas invalidan este índice.</p>
+        }
+        <p class="mt-3 text-xs leading-5 text-slate-500">La disponibilidad ante otros dispositivos y la transferencia de contenido se habilitarán cuando termine el siguiente hito del canal P2P.</p>
+      </section>
+
+      <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
         <div class="flex items-center justify-between gap-3">
           <div>
             <h2 class="font-semibold">Cambios detectados</h2>

@@ -72,6 +72,9 @@ export class DesktopSyncComponent implements OnInit, OnDestroy {
   readonly device = signal<DesktopDeviceRegistration | null>(null);
   readonly roots = signal<SyncRoot[]>([]);
   readonly changes = signal<SyncChange[]>([]);
+  readonly indexedFileCount = signal<number | null>(null);
+  readonly indexingBusy = signal(false);
+  readonly indexNotice = signal<string | null>(null);
   readonly busy = signal(false);
   readonly error = signal<string | null>(null);
   readonly meshEnabled = signal(false);
@@ -90,6 +93,10 @@ export class DesktopSyncComponent implements OnInit, OnDestroy {
     if (!events) return;
     void events.listen<SyncChange>('sync-change', ({ payload }) => {
       this.changes.update((items) => [payload, ...items.filter((item) => item.id !== payload.id)].slice(0, 100));
+      if (this.indexedFileCount() !== null) {
+        this.indexedFileCount.set(null);
+        this.indexNotice.set('Cambió una carpeta observada; vuelve a analizar las copias antes de usarlas.');
+      }
     }).then((stop) => (this.stopListening = stop));
     void events.listen<MeshPeerUpdate>('mesh-peer-update', ({ payload }) => {
       this.meshPeerStatuses.update((statuses) => ({ ...statuses, [payload.peerId]: payload.status }));
@@ -143,6 +150,27 @@ export class DesktopSyncComponent implements OnInit, OnDestroy {
       this.roots.update((roots) => roots.filter((item) => item.id !== root.id));
     } catch {
       this.error.set('No se pudo quitar la carpeta de este dispositivo.');
+    }
+  }
+
+  async indexLocalFiles(): Promise<void> {
+    if (!this.roots().length) {
+      this.indexNotice.set('Primero elige una carpeta para sincronizar.');
+      return;
+    }
+    this.indexingBusy.set(true);
+    this.indexNotice.set(null);
+    try {
+      const fileCount = await this.invoke<number>('index_sync_files');
+      this.indexedFileCount.set(fileCount);
+      this.indexNotice.set(fileCount
+        ? `${fileCount} copias locales analizadas. Las rutas y huellas permanecen en este dispositivo; no se anuncian al servidor.`
+        : 'No se encontraron archivos regulares en las carpetas observadas.');
+    } catch (error) {
+      this.indexedFileCount.set(null);
+      this.indexNotice.set(typeof error === 'string' ? error : 'No se pudieron analizar las copias locales.');
+    } finally {
+      this.indexingBusy.set(false);
     }
   }
 

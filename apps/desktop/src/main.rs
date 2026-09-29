@@ -35,7 +35,8 @@ fn main() {
             sync::choose_sync_folder,
             sync::add_sync_root,
             sync::remove_sync_root,
-            sync::get_pending_sync_changes
+            sync::get_pending_sync_changes,
+            sync::index_sync_files
         ])
         .run(tauri::generate_context!())
         .expect("failed to run CloudFusion desktop");
