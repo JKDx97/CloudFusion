@@ -11,6 +11,7 @@ function node(overrides: Partial<VirtualNode> = {}): VirtualNode {
   return {
     id: 'node-id',
     userId: 'owner-id',
+    workspaceId: null,
     parentId: null,
     name: 'Mi Drive',
     type: VirtualNodeType.FOLDER,
@@ -48,7 +49,7 @@ function fixture(permissions?: { requireRead: jest.Mock; requireWrite: jest.Mock
   const queue = { enqueue: jest.fn() };
   const audit = { record: jest.fn() };
   const encryption = { encryptFile: jest.fn(), decryptFile: jest.fn() };
-  const dataSource = { transaction: jest.fn() };
+  const dataSource = { query: jest.fn(), transaction: jest.fn() };
   const config = { get: jest.fn((key: string) => key === 'virtualDrive.defaultReplicationFactor' ? 1 : undefined) };
   const service = new VirtualDriveService(nodes as never, objects as never, replicas as never, policies as never, accounts as never, queue as never, audit as never, config as never, dataSource as never, encryption as never, fileVersions as never, undefined, permissions as never);
   return { service, nodes, objects, fileVersions, snapshotEntries, replicas, policies, accounts, queue, audit, encryption, dataSource };
@@ -64,6 +65,34 @@ describe('VirtualDriveService', () => {
 
     expect(result.isRoot).toBe(true);
     expect(fixtureData.nodes.save).toHaveBeenCalledWith(expect.objectContaining({ userId: 'owner-id', isRoot: true, parentId: null }));
+  });
+
+  it('creates a workspace root separately and only for a workspace member', async () => {
+    const fixtureData = fixture();
+    const workspaceRoot = node({ id: 'workspace-root', userId: 'owner-id', workspaceId: 'workspace-id', name: 'Workspace team-abcd', isRoot: true });
+    const repository = {
+      findOne: jest.fn().mockResolvedValue(null),
+      create: jest.fn((value: Partial<VirtualNode>) => value),
+      save: jest.fn().mockResolvedValue(workspaceRoot),
+    };
+    const manager = { query: jest.fn(), getRepository: jest.fn(() => repository) };
+    fixtureData.dataSource.query.mockResolvedValue([{ ownerUserId: 'owner-id', slug: 'team-abcd' }]);
+    fixtureData.dataSource.transaction.mockImplementation(async (callback: (manager: unknown) => Promise<unknown>) => callback(manager));
+
+    const result = await fixtureData.service.getWorkspaceRoot('member-id', 'workspace-id');
+
+    expect(fixtureData.dataSource.query).toHaveBeenCalledWith(expect.stringContaining('workspace_members'), ['workspace-id', 'member-id']);
+    expect(manager.query).toHaveBeenCalledWith('SELECT id FROM workspaces WHERE id = $1 FOR UPDATE', ['workspace-id']);
+    expect(repository.save).toHaveBeenCalledWith(expect.objectContaining({ userId: 'owner-id', workspaceId: 'workspace-id', isRoot: true }));
+    expect(result).toEqual(expect.objectContaining({ id: 'workspace-root', workspaceId: 'workspace-id' }));
+  });
+
+  it('does not disclose or initialize a workspace root to a non-member', async () => {
+    const fixtureData = fixture();
+    fixtureData.dataSource.query.mockResolvedValue([]);
+
+    await expect(fixtureData.service.getWorkspaceRoot('outsider-id', 'workspace-id')).rejects.toBeInstanceOf(NotFoundException);
+    expect(fixtureData.dataSource.transaction).not.toHaveBeenCalled();
   });
 
   it('rejects access to another user node', async () => {

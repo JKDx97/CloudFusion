@@ -47,6 +47,7 @@ export type VirtualNodeStatus = 'AVAILABLE' | 'UPLOADING' | 'DEGRADED' | 'UNAVAI
 export interface VirtualNode {
   id: string;
   userId: string;
+  workspaceId: string | null;
   parentId: string | null;
   name: string;
   type: VirtualNodeType;
@@ -157,6 +158,48 @@ export interface PublicShareInfo {
   downloadLimit?: number | null;
   downloadCount?: number;
   resource?: { name: string; type: VirtualNodeType; mimeType: string | null; size: number | null };
+}
+
+export type WorkspaceRole = 'OWNER' | 'ADMIN' | 'MEMBER' | 'VIEWER';
+
+export interface WorkspaceRecord {
+  id: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  ownerUserId: string;
+  createdAt: string;
+  updatedAt: string;
+  role: WorkspaceRole;
+  memberCount?: number;
+}
+
+export interface WorkspacePage {
+  items: WorkspaceRecord[];
+  page: number;
+  limit: number;
+  total: number;
+}
+
+export interface WorkspaceMemberRecord {
+  user: { id: string; username: string; email: string } | null;
+  role: WorkspaceRole;
+  joinedAt: string;
+}
+
+export interface WorkspaceInvitationRecord {
+  id: string;
+  workspaceId: string;
+  email: string;
+  role: WorkspaceRole;
+  expiresAt: string;
+  acceptedAt: string | null;
+  revokedAt: string | null;
+  createdAt: string;
+}
+
+export interface CreateWorkspaceInvitationResult extends WorkspaceInvitationRecord {
+  token: string;
 }
 
 export interface FileVersionRecord {

@@ -4,7 +4,7 @@ import { Observable, map } from 'rxjs';
 import { AuthService } from '../auth/auth.service';
 import { environment } from '../../../environments/environment';
 import { ApiResponse } from '../../shared/models/api-response.model';
-import { BackupJobRecord, BackupPolicyRecord, CloudAccount, CloudAccountImpactRecord, CloudFile, CloudProvider, CloudSearchResponse, CloudStorageSummary, CreatePublicShareResult, CreateShareInvitationResult, DataProtectionEventRecord, FileVersionRecord, ProtectionAlertRecord, ProtectionOverviewRecord, PublicShareExpiry, PublicShareInfo, PublicSharePage, PublicSharePermission, PublicShareRecord, ResourceShareRecord, ResourceShareRole, ShareInvitationPage, SharePage, ShareUserSearchResult, SnapshotEntryRecord, SnapshotRecord, SnapshotRestoreJobRecord, StorageRule, TransferJob, TransferProgressEvent, TransferOperation, VirtualNode } from '../../shared/models/cloud.model';
+import { BackupJobRecord, BackupPolicyRecord, CloudAccount, CloudAccountImpactRecord, CloudFile, CloudProvider, CloudSearchResponse, CloudStorageSummary, CreatePublicShareResult, CreateShareInvitationResult, CreateWorkspaceInvitationResult, DataProtectionEventRecord, FileVersionRecord, ProtectionAlertRecord, ProtectionOverviewRecord, PublicShareExpiry, PublicShareInfo, PublicSharePage, PublicSharePermission, PublicShareRecord, ResourceShareRecord, ResourceShareRole, ShareInvitationPage, SharePage, ShareUserSearchResult, SnapshotEntryRecord, SnapshotRecord, SnapshotRestoreJobRecord, StorageRule, TransferJob, TransferProgressEvent, TransferOperation, VirtualNode, WorkspaceInvitationRecord, WorkspaceMemberRecord, WorkspacePage, WorkspaceRecord, WorkspaceRole } from '../../shared/models/cloud.model';
 
 @Injectable({ providedIn: 'root' })
 export class CloudService {
@@ -225,6 +225,55 @@ export class CloudService {
 
   downloadPublicShare(token: string, password?: string): Observable<Blob> {
     return this.http.post(`${this.apiUrl}/s/${token}/download`, { password }, { responseType: 'blob' });
+  }
+
+  listWorkspaces(page = 1, limit = 25): Observable<WorkspacePage> {
+    const params = new HttpParams().set('page', page).set('limit', limit);
+    return this.http.get<ApiResponse<WorkspacePage>>(`${this.apiUrl}/workspaces`, { params }).pipe(map((response) => response.data));
+  }
+
+  createWorkspace(name: string, description?: string): Observable<WorkspaceRecord> {
+    return this.http.post<ApiResponse<WorkspaceRecord>>(`${this.apiUrl}/workspaces`, { name, description }).pipe(map((response) => response.data));
+  }
+
+  getWorkspaceMembers(workspaceId: string, page = 1, limit = 100): Observable<{ items: WorkspaceMemberRecord[]; page: number; limit: number; total: number }> {
+    const params = new HttpParams().set('page', page).set('limit', limit);
+    return this.http.get<ApiResponse<{ items: WorkspaceMemberRecord[]; page: number; limit: number; total: number }>>(`${this.apiUrl}/workspaces/${workspaceId}/members`, { params }).pipe(map((response) => response.data));
+  }
+
+  getWorkspaceDriveRoot(workspaceId: string): Observable<VirtualNode> {
+    return this.http.get<ApiResponse<VirtualNode>>(`${this.apiUrl}/workspaces/${workspaceId}/drive/root`).pipe(map((response) => response.data));
+  }
+
+  getWorkspaceDriveChildren(workspaceId: string, nodeId: string): Observable<VirtualNode[]> {
+    return this.http.get<ApiResponse<VirtualNode[]>>(`${this.apiUrl}/workspaces/${workspaceId}/drive/nodes/${nodeId}/children`).pipe(map((response) => response.data));
+  }
+
+  createWorkspaceFolder(workspaceId: string, name: string, parentId?: string): Observable<VirtualNode> {
+    return this.http.post<ApiResponse<VirtualNode>>(`${this.apiUrl}/workspaces/${workspaceId}/drive/folders`, { name, parentId }).pipe(map((response) => response.data));
+  }
+
+  uploadWorkspaceFile(workspaceId: string, file: File, parentId?: string): Observable<{ node: VirtualNode; queued: boolean; replicas: number; warning?: string }> {
+    const form = new FormData();
+    form.append('file', file, file.name);
+    if (parentId) form.append('parentId', parentId);
+    return this.http.post<ApiResponse<{ node: VirtualNode; queued: boolean; replicas: number; warning?: string }>>(`${this.apiUrl}/workspaces/${workspaceId}/drive/upload`, form).pipe(map((response) => response.data));
+  }
+
+  createWorkspaceInvitation(workspaceId: string, email: string, role: WorkspaceRole): Observable<CreateWorkspaceInvitationResult> {
+    return this.http.post<ApiResponse<CreateWorkspaceInvitationResult>>(`${this.apiUrl}/workspaces/${workspaceId}/invitations`, { email, role }).pipe(map((response) => response.data));
+  }
+
+  acceptWorkspaceInvitation(token: string): Observable<{ workspaceId: string; userId: string; role: WorkspaceRole; joinedAt: string }> {
+    return this.http.post<ApiResponse<{ workspaceId: string; userId: string; role: WorkspaceRole; joinedAt: string }>>(`${this.apiUrl}/workspaces/invitations/accept`, { token }).pipe(map((response) => response.data));
+  }
+
+  updateWorkspaceMemberRole(workspaceId: string, userId: string, role: WorkspaceRole): Observable<{ userId: string; role: WorkspaceRole }> {
+    return this.http.patch<ApiResponse<{ userId: string; role: WorkspaceRole }>>(`${this.apiUrl}/workspaces/${workspaceId}/members/${userId}`, { role }).pipe(map((response) => response.data));
+  }
+
+  removeWorkspaceMember(workspaceId: string, userId: string): Observable<{ removed: true }> {
+    return this.http.delete<ApiResponse<{ removed: true }>>(`${this.apiUrl}/workspaces/${workspaceId}/members/${userId}`).pipe(map((response) => response.data));
   }
 
   createVirtualFolder(name: string, parentId?: string): Observable<VirtualNode> {

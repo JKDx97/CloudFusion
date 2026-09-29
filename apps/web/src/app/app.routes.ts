@@ -8,6 +8,7 @@ export const routes: Routes = [
   { path: 'register', loadComponent: () => import('./features/auth/register/register.component').then((m) => m.RegisterComponent) },
   { path: 'dashboard', canActivate: [authGuard], loadComponent: () => import('./features/dashboard/dashboard.component').then((m) => m.DashboardComponent) },
   { path: 'drive', canActivate: [authGuard], loadComponent: () => import('./features/drive/drive.component').then((m) => m.DriveComponent) },
+  { path: 'workspaces', canActivate: [authGuard], loadComponent: () => import('./features/workspaces/workspace-drive.component').then((m) => m.WorkspaceDriveComponent) },
   { path: 'protection', canActivate: [authGuard], loadComponent: () => import('./features/protection/protection.component').then((m) => m.ProtectionComponent) },
   { path: 'transfers', canActivate: [authGuard], loadComponent: () => import('./features/transfers/transfer-center.component').then((m) => m.TransferCenterComponent) },
   { path: 'search', canActivate: [authGuard], loadComponent: () => import('./features/search/search.component').then((m) => m.SearchComponent) },

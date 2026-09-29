@@ -41,6 +41,7 @@ import { PermissionsService } from '../permissions/permissions.service';
 export interface VirtualNodeResponse {
   id: string;
   userId: string;
+  workspaceId: string | null;
   parentId: string | null;
   name: string;
   type: VirtualNodeType;
@@ -90,6 +91,42 @@ export class VirtualDriveService {
 
   async getRoot(userId: string): Promise<VirtualNodeResponse> {
     return this.toResponse(await this.ensureRoot(userId));
+  }
+
+  async getWorkspaceRoot(userId: string, workspaceId: string): Promise<VirtualNodeResponse> {
+    const rows = await this.dataSource.query(
+      `SELECT workspace.owner_user_id AS "ownerUserId", workspace.slug
+       FROM workspaces workspace
+       INNER JOIN workspace_members member ON member.workspace_id = workspace.id
+       WHERE workspace.id = $1 AND member.user_id = $2`,
+      [workspaceId, userId],
+    ) as Array<{ ownerUserId: string; slug: string }>;
+    const workspace = rows[0];
+    if (!workspace) throw new NotFoundException('Workspace not found');
+
+    const root = await this.dataSource.transaction(async (manager) => {
+      await manager.query('SELECT id FROM workspaces WHERE id = $1 FOR UPDATE', [workspaceId]);
+      const repository = manager.getRepository(VirtualNode);
+      const existing = await repository.findOne({ where: { workspaceId, isRoot: true, deletedAt: IsNull() } });
+      if (existing) return existing;
+      return repository.save(repository.create({
+        userId: workspace.ownerUserId,
+        workspaceId,
+        parentId: null,
+        name: `Workspace ${workspace.slug}`,
+        type: VirtualNodeType.FOLDER,
+        mimeType: 'inode/directory',
+        size: null,
+        status: VirtualNodeStatus.AVAILABLE,
+        storageObjectId: null,
+        deletedAt: null,
+        previousParentId: null,
+        isRoot: true,
+        isFavorite: false,
+        lastAccessedAt: null,
+      }));
+    });
+    return this.toResponse(root);
   }
 
   async getNode(userId: string, id: string): Promise<VirtualNodeResponse> {
@@ -188,7 +225,7 @@ export class VirtualDriveService {
     const parent = parentId ? await this.findAccessible(parentId, userId) : await this.ensureRoot(userId);
     if (parent.type !== VirtualNodeType.FOLDER) throw new BadRequestException('Parent node must be a folder');
     const children = await this.nodes.find({
-      where: { userId: parent.userId, parentId: parent.id, deletedAt: IsNull() },
+      where: { userId: parent.userId, workspaceId: parent.workspaceId ?? IsNull(), parentId: parent.id, deletedAt: IsNull() },
       order: { type: 'ASC', name: 'ASC' },
     });
     return children.map((node) => this.toResponse(node));
@@ -198,9 +235,10 @@ export class VirtualDriveService {
     const parent = dto.parentId ? await this.findWritable(dto.parentId, userId) : await this.ensureRoot(userId);
     if (parent.type !== VirtualNodeType.FOLDER) throw new BadRequestException('Parent node must be a folder');
     const name = this.cleanName(dto.name);
-    await this.ensureAvailableName(parent.userId, parent.id, name);
+    await this.ensureAvailableName(parent.userId, parent.id, name, undefined, parent.workspaceId);
     const folder = await this.nodes.save(this.nodes.create({
       userId: parent.userId,
+      workspaceId: parent.workspaceId,
       parentId: parent.id,
       name,
       type: VirtualNodeType.FOLDER,
@@ -250,7 +288,7 @@ export class VirtualDriveService {
       : parentId ? await this.findOwned(parentId, userId) : await this.ensureRoot(userId);
     if (parent.type !== VirtualNodeType.FOLDER) throw new BadRequestException('Parent node must be a folder');
     const name = targetNode ? targetNode.name : this.cleanName(file.originalname);
-    if (!targetNode) await this.ensureAvailableName(userId, parent.id, name);
+    if (!targetNode) await this.ensureAvailableName(userId, parent.id, name, undefined, parent.workspaceId);
     const policy = await this.ensureDefaultPolicy(userId);
     const storageObjectId = randomUUID();
     const encryptedDirectory = join(tmpdir(), 'cloudfusion-encrypted-uploads');
@@ -300,6 +338,7 @@ export class VirtualDriveService {
           const sharedObject = await objectRepository.save(existing);
           const sharedNode = versionTarget ?? await nodeRepository.save(nodeRepository.create({
               userId,
+              workspaceId: parent.workspaceId,
               parentId: parent.id,
               name,
               type: VirtualNodeType.FILE,
@@ -356,6 +395,7 @@ export class VirtualDriveService {
         }));
         const node = versionTarget ?? await nodeRepository.save(nodeRepository.create({
             userId,
+            workspaceId: parent.workspaceId,
             parentId: parent.id,
             name,
             type: VirtualNodeType.FILE,
@@ -447,7 +487,7 @@ export class VirtualDriveService {
     const node = await this.findWritable(id, userId);
     if (node.isRoot) throw new BadRequestException('The drive root cannot be renamed');
     const name = this.cleanName(dto.name);
-    await this.ensureAvailableName(node.userId, node.parentId, name, node.id);
+    await this.ensureAvailableName(node.userId, node.parentId, name, node.id, node.workspaceId);
     node.name = name;
     const saved = await this.nodes.save(node);
     await this.audit.record(userId, 'VIRTUAL_NODE_RENAMED', 'VirtualNode', id, { name });
@@ -459,9 +499,10 @@ export class VirtualDriveService {
     if (node.isRoot) throw new BadRequestException('The drive root cannot be moved');
     const parent = dto.parentId ? await this.findWritable(dto.parentId, userId) : await this.ensureRoot(userId);
     if (parent.userId !== node.userId) throw new BadRequestException('A shared resource cannot be moved outside its owner drive');
+    if (parent.workspaceId !== node.workspaceId) throw new BadRequestException('A node cannot be moved between personal and workspace drives');
     if (parent.type !== VirtualNodeType.FOLDER) throw new BadRequestException('Destination must be a folder');
     if (parent.id === node.id || await this.isDescendant(parent.id, node.id, node.userId)) throw new BadRequestException('Cannot move a folder inside itself');
-    await this.ensureAvailableName(node.userId, parent.id, node.name, node.id);
+    await this.ensureAvailableName(node.userId, parent.id, node.name, node.id, node.workspaceId);
     const previousParentId = node.parentId;
     node.parentId = parent.id;
     const saved = await this.nodes.save(node);
@@ -487,8 +528,10 @@ export class VirtualDriveService {
   async restore(userId: string, id: string): Promise<VirtualNodeResponse> {
     const node = await this.findOwned(id, userId, true);
     if (!node.deletedAt) throw new BadRequestException('Node is not in trash');
-    const parent = node.previousParentId ? await this.findOwned(node.previousParentId, userId).catch(() => this.ensureRoot(userId)) : await this.ensureRoot(userId);
-    await this.ensureAvailableName(userId, parent.id, node.name, node.id);
+    const workspaceRoot = node.workspaceId ? await this.getWorkspaceRoot(userId, node.workspaceId) : null;
+    const root = workspaceRoot ? await this.findOwned(workspaceRoot.id, userId) : await this.ensureRoot(userId);
+    const parent = node.previousParentId ? await this.findOwned(node.previousParentId, userId).catch(() => root) : root;
+    await this.ensureAvailableName(userId, parent.id, node.name, node.id, node.workspaceId);
     const descendants = await this.collectTree(userId, node, true);
     for (const item of [node, ...descendants]) {
       item.deletedAt = null;
@@ -565,7 +608,7 @@ export class VirtualDriveService {
   }
 
   async recent(userId: string): Promise<VirtualNodeResponse[]> {
-    const nodes = await this.nodes.find({ where: { userId, deletedAt: IsNull() }, order: { lastAccessedAt: 'DESC', updatedAt: 'DESC' }, take: 50 });
+    const nodes = await this.nodes.find({ where: { userId, workspaceId: IsNull(), deletedAt: IsNull() }, order: { lastAccessedAt: 'DESC', updatedAt: 'DESC' }, take: 50 });
     return nodes.filter((node) => !node.isRoot && node.lastAccessedAt).map((node) => this.toResponse(node));
   }
 
@@ -643,12 +686,12 @@ export class VirtualDriveService {
   }
 
   async favorites(userId: string): Promise<VirtualNodeResponse[]> {
-    const nodes = await this.nodes.find({ where: { userId, isFavorite: true, deletedAt: IsNull() }, order: { name: 'ASC' } });
+    const nodes = await this.nodes.find({ where: { userId, workspaceId: IsNull(), isFavorite: true, deletedAt: IsNull() }, order: { name: 'ASC' } });
     return nodes.map((node) => this.toResponse(node));
   }
 
   async trashList(userId: string): Promise<VirtualNodeResponse[]> {
-    const nodes = await this.nodes.find({ where: { userId }, order: { deletedAt: 'DESC', name: 'ASC' } });
+    const nodes = await this.nodes.find({ where: { userId, workspaceId: IsNull() }, order: { deletedAt: 'DESC', name: 'ASC' } });
     return nodes.filter((node) => Boolean(node.deletedAt)).map((node) => this.toResponse(node));
   }
 
@@ -670,7 +713,7 @@ export class VirtualDriveService {
     healthyReplicas: number;
     degradedObjects: number;
   }> {
-    const files = await this.nodes.find({ where: { userId, type: VirtualNodeType.FILE, deletedAt: IsNull() } });
+    const files = await this.nodes.find({ where: { userId, workspaceId: IsNull(), type: VirtualNodeType.FILE, deletedAt: IsNull() } });
     const objectIds = [...new Set(files.map((file) => file.storageObjectId).filter((value): value is string => Boolean(value)))];
     const objects = objectIds.length ? await this.objects.find({ where: objectIds.map((id) => ({ id, userId })) }) : [];
     const replicas = objectIds.length ? await this.replicas.find({ where: objectIds.map((storageObjectId) => ({ storageObjectId })) }) : [];
@@ -711,10 +754,11 @@ export class VirtualDriveService {
   }
 
   private async ensureRoot(userId: string): Promise<VirtualNode> {
-    const existing = await this.nodes.findOne({ where: { userId, isRoot: true, deletedAt: IsNull() } });
+    const existing = await this.nodes.findOne({ where: { userId, workspaceId: IsNull(), isRoot: true, deletedAt: IsNull() } });
     if (existing) return existing;
     return this.nodes.save(this.nodes.create({
       userId,
+      workspaceId: null,
       parentId: null,
       name: 'Mi Drive',
       type: VirtualNodeType.FOLDER,
@@ -769,8 +813,8 @@ export class VirtualDriveService {
     return this.findAccessible(id, userId);
   }
 
-  private async ensureAvailableName(userId: string, parentId: string | null, name: string, exceptId?: string): Promise<void> {
-    const where = { userId, parentId: parentId ?? IsNull(), name, deletedAt: IsNull() };
+  private async ensureAvailableName(userId: string, parentId: string | null, name: string, exceptId?: string, workspaceId: string | null = null): Promise<void> {
+    const where = { userId, workspaceId: workspaceId ?? IsNull(), parentId: parentId ?? IsNull(), name, deletedAt: IsNull() };
     const existing = await this.nodes.findOne({ where });
     if (existing && existing.id !== exceptId) throw new ConflictException('A node with that name already exists in the destination');
   }
@@ -786,7 +830,7 @@ export class VirtualDriveService {
 
   private async collectTree(userId: string, parent: VirtualNode, includeDeleted = false): Promise<VirtualNode[]> {
     const result: VirtualNode[] = [];
-    const children = await this.nodes.find({ where: { userId, parentId: parent.id, ...(includeDeleted ? {} : { deletedAt: IsNull() }) }, order: { createdAt: 'ASC' } });
+    const children = await this.nodes.find({ where: { userId, workspaceId: parent.workspaceId ?? IsNull(), parentId: parent.id, ...(includeDeleted ? {} : { deletedAt: IsNull() }) }, order: { createdAt: 'ASC' } });
     for (const child of children) {
       result.push(child, ...(await this.collectTree(userId, child, includeDeleted)));
     }
@@ -803,6 +847,7 @@ export class VirtualDriveService {
     return {
       id: node.id,
       userId: node.userId,
+      workspaceId: node.workspaceId,
       parentId: node.parentId,
       name: node.name,
       type: node.type,

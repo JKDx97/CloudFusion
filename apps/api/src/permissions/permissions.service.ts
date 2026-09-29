@@ -3,7 +3,7 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { ResourceShareRole } from './entities/resource-share.entity';
 
-export type EffectivePermission = 'NONE' | 'VIEWER' | 'EDITOR' | 'OWNER';
+export type EffectivePermission = 'NONE' | 'VIEWER' | 'EDITOR' | 'MANAGER' | 'OWNER';
 
 @Injectable()
 export class PermissionsService {
@@ -12,27 +12,51 @@ export class PermissionsService {
   async effectivePermission(userId: string, nodeId: string): Promise<EffectivePermission> {
     const rows = await this.dataSource.query(
       `WITH RECURSIVE ancestors AS (
-         SELECT id, parent_id, user_id, 0 AS depth
+         SELECT id, parent_id, user_id, workspace_id, 0 AS depth
          FROM virtual_nodes
          WHERE id = $1 AND deleted_at IS NULL
          UNION ALL
-         SELECT parent.id, parent.parent_id, parent.user_id, ancestors.depth + 1
+         SELECT parent.id, parent.parent_id, parent.user_id, parent.workspace_id, ancestors.depth + 1
          FROM virtual_nodes parent
          INNER JOIN ancestors ON parent.id = ancestors.parent_id
-         WHERE parent.user_id = ancestors.user_id AND parent.deleted_at IS NULL
+         WHERE parent.workspace_id IS NOT DISTINCT FROM ancestors.workspace_id
+           AND (parent.workspace_id IS NOT NULL OR parent.user_id = ancestors.user_id)
+           AND parent.deleted_at IS NULL
        )
        SELECT CASE
-         WHEN (SELECT user_id FROM ancestors WHERE depth = 0) = $2::uuid THEN 'OWNER'
+         WHEN (SELECT workspace_id FROM ancestors WHERE depth = 0) IS NULL
+          AND (SELECT user_id FROM ancestors WHERE depth = 0) = $2::uuid THEN 'OWNER'
          ELSE COALESCE((
-           SELECT shares.role::text
-           FROM resource_shares shares
-           INNER JOIN ancestors ON ancestors.id = shares.node_id
-           WHERE shares.shared_with_user_id = $2::uuid
-             AND shares.owner_user_id = ancestors.user_id
-             AND shares.status = 'ACTIVE'
-             AND shares.revoked_at IS NULL
-           ORDER BY CASE shares.role::text WHEN 'EDITOR' THEN 2 ELSE 1 END DESC,
-                    ancestors.depth ASC
+           SELECT grants.permission
+           FROM (
+             SELECT CASE workspace_members.role::text
+                      WHEN 'OWNER' THEN 'OWNER'
+                      WHEN 'ADMIN' THEN 'MANAGER'
+                      WHEN 'MEMBER' THEN 'EDITOR'
+                      ELSE 'VIEWER'
+                    END AS permission,
+                    CASE workspace_members.role::text
+                      WHEN 'OWNER' THEN 4
+                      WHEN 'ADMIN' THEN 3
+                      WHEN 'MEMBER' THEN 2
+                      ELSE 1
+                    END AS priority,
+                    0 AS depth
+             FROM workspace_members
+             WHERE workspace_members.workspace_id = (SELECT workspace_id FROM ancestors WHERE depth = 0)
+               AND workspace_members.user_id = $2::uuid
+             UNION ALL
+             SELECT shares.role::text AS permission,
+                    CASE shares.role::text WHEN 'EDITOR' THEN 2 ELSE 1 END AS priority,
+                    ancestors.depth
+             FROM resource_shares shares
+             INNER JOIN ancestors ON ancestors.id = shares.node_id
+             WHERE shares.shared_with_user_id = $2::uuid
+               AND shares.owner_user_id = ancestors.user_id
+               AND shares.status = 'ACTIVE'
+               AND shares.revoked_at IS NULL
+           ) grants
+           ORDER BY grants.priority DESC, grants.depth ASC
            LIMIT 1
          ), 'NONE')
        END AS permission`,
@@ -48,7 +72,7 @@ export class PermissionsService {
 
   async canWrite(userId: string, nodeId: string): Promise<boolean> {
     const permission = await this.effectivePermission(userId, nodeId);
-    return permission === 'OWNER' || permission === ResourceShareRole.EDITOR;
+    return permission === 'OWNER' || permission === 'MANAGER' || permission === ResourceShareRole.EDITOR;
   }
 
   async canDelete(userId: string, nodeId: string): Promise<boolean> {
@@ -57,11 +81,13 @@ export class PermissionsService {
   }
 
   async canShare(userId: string, nodeId: string): Promise<boolean> {
-    return (await this.effectivePermission(userId, nodeId)) === 'OWNER';
+    const permission = await this.effectivePermission(userId, nodeId);
+    return permission === 'OWNER' || permission === 'MANAGER';
   }
 
   async canManage(userId: string, nodeId: string): Promise<boolean> {
-    return (await this.effectivePermission(userId, nodeId)) === 'OWNER';
+    const permission = await this.effectivePermission(userId, nodeId);
+    return permission === 'OWNER' || permission === 'MANAGER';
   }
 
   async canDownload(userId: string, nodeId: string): Promise<boolean> {

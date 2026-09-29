@@ -426,6 +426,7 @@ export class DriveComponent implements OnInit {
     return {
       ...entry.node,
       userId: entry.user?.id ?? '',
+      workspaceId: null,
       status: 'AVAILABLE',
       storageObjectId: null,
       currentVersionId: null,

@@ -12,6 +12,11 @@ import { VirtualNodeType } from '../enums/virtual-node-type.enum';
 @Entity('virtual_nodes')
 @Index('IDX_virtual_nodes_user_parent', ['userId', 'parentId'])
 @Index('IDX_virtual_nodes_user_recent', ['userId', 'lastAccessedAt'])
+@Index('IDX_virtual_nodes_workspace_parent', ['workspaceId', 'parentId'])
+@Index('UQ_virtual_nodes_workspace_root', ['workspaceId'], {
+  unique: true,
+  where: '"workspace_id" IS NOT NULL AND "is_root" = true AND "deleted_at" IS NULL',
+})
 @Index('UQ_virtual_nodes_user_parent_name_active', ['userId', 'parentId', 'name'], {
   unique: true,
   where: '"deleted_at" IS NULL',
@@ -22,6 +27,9 @@ export class VirtualNode {
 
   @Column({ name: 'user_id', type: 'uuid' })
   userId!: string;
+
+  @Column({ name: 'workspace_id', type: 'uuid', nullable: true })
+  workspaceId!: string | null;
 
   @Column({ name: 'parent_id', type: 'uuid', nullable: true })
   parentId!: string | null;

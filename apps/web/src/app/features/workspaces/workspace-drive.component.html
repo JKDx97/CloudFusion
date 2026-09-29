@@ -1,0 +1,84 @@
+<main class="min-h-screen bg-[#f7f8fc] text-slate-900">
+  <header class="border-b border-slate-200/80 bg-white">
+    <div class="mx-auto flex max-w-[1500px] flex-wrap items-center justify-between gap-3 px-5 py-4 lg:px-8">
+      <div class="flex items-center gap-3"><div class="grid h-10 w-10 place-items-center rounded-xl bg-indigo-600 text-lg font-bold text-white">C</div><div><p class="font-semibold">CloudFusion</p><p class="text-xs text-slate-500">Workspaces</p></div></div>
+      <nav class="flex flex-wrap gap-2" aria-label="Navegación principal"><a routerLink="/drive" class="rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50">Mi Drive</a><a routerLink="/dashboard" class="rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50">Explorador cloud</a></nav>
+    </div>
+  </header>
+
+  <div class="mx-auto grid max-w-[1500px] gap-6 px-5 py-6 lg:grid-cols-[300px_minmax(0,1fr)] lg:px-8">
+    <aside class="space-y-4">
+      <section class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <div class="flex items-center justify-between"><h1 class="text-sm font-bold uppercase tracking-[0.15em] text-slate-500">Mis workspaces</h1><button type="button" class="text-xs font-semibold text-indigo-600 hover:text-indigo-800" (click)="loadWorkspaces()">Actualizar</button></div>
+        <p *ngIf="loading() && !activeWorkspace()" class="py-4 text-sm text-slate-500">Cargando…</p>
+        <p *ngIf="!loading() && !workspaces().length" class="py-4 text-sm leading-5 text-slate-500">Todavía no formas parte de un workspace.</p>
+        <div class="mt-2 space-y-1">
+          <button *ngFor="let workspace of workspaces()" class="flex w-full items-start gap-3 rounded-xl px-3 py-3 text-left hover:bg-indigo-50" [class.bg-indigo-50]="activeWorkspace()?.id === workspace.id" type="button" (click)="openWorkspace(workspace)">
+            <span class="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-indigo-100 font-bold text-indigo-700">{{ workspace.name.slice(0, 1).toUpperCase() }}</span>
+            <span class="min-w-0 flex-1"><span class="block truncate text-sm font-semibold text-slate-800">{{ workspace.name }}</span><span class="mt-0.5 block text-xs text-slate-500">{{ workspace.role }}<span *ngIf="workspace.memberCount"> · {{ workspace.memberCount }} miembros</span></span></span>
+          </button>
+        </div>
+      </section>
+
+      <form class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm" (submit)="$event.preventDefault(); createWorkspace()">
+        <h2 class="text-sm font-semibold text-slate-800">Crear workspace</h2>
+        <label class="mt-3 block text-xs font-semibold text-slate-600" for="workspace-name">Nombre</label>
+        <input id="workspace-name" class="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm" maxlength="100" placeholder="Proyecto UPC" [value]="workspaceName()" (input)="workspaceName.set($any($event.target).value)" />
+        <label class="mt-3 block text-xs font-semibold text-slate-600" for="workspace-description">Descripción (opcional)</label>
+        <textarea id="workspace-description" class="mt-1 w-full resize-y rounded-lg border border-slate-200 px-3 py-2 text-sm" rows="2" maxlength="500" placeholder="Equipo de trabajo" [value]="workspaceDescription()" (input)="workspaceDescription.set($any($event.target).value)"></textarea>
+        <button class="mt-3 w-full rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-50" type="submit" [disabled]="busy()">{{ busy() ? 'Creando…' : '＋ Crear workspace' }}</button>
+      </form>
+
+      <section class="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
+        <h2 class="text-sm font-semibold text-slate-800">¿Tienes una invitación?</h2>
+        <label class="sr-only" for="workspace-invite-token">Código de invitación de workspace</label>
+        <input id="workspace-invite-token" class="mt-3 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm" autocomplete="off" placeholder="Pega el código recibido" [value]="invitationToken()" (input)="invitationToken.set($any($event.target).value)" />
+        <button class="mt-2 w-full rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-sm font-semibold text-indigo-700 hover:bg-indigo-100 disabled:opacity-50" type="button" (click)="acceptInvitation()" [disabled]="busy()">Aceptar invitación</button>
+      </section>
+    </aside>
+
+    <section class="min-w-0 space-y-4">
+      <div *ngIf="error()" class="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800" role="alert">{{ error() }}</div>
+      <section *ngIf="!activeWorkspace()" class="grid min-h-80 place-items-center rounded-2xl border border-slate-200 bg-white p-8 text-center shadow-sm">
+        <div><div class="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-indigo-50 text-2xl text-indigo-600">⌂</div><h2 class="mt-4 text-xl font-semibold text-slate-900">Tu espacio de equipo</h2><p class="mt-2 max-w-md text-sm leading-6 text-slate-500">Crea un workspace o selecciónalo para abrir su unidad compartida y administrar a sus miembros.</p></div>
+      </section>
+
+      <ng-container *ngIf="activeWorkspace() as workspace">
+        <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <div class="flex flex-wrap items-start justify-between gap-4">
+            <div><p class="text-xs font-bold uppercase tracking-[0.15em] text-indigo-600">Unidad compartida · {{ workspace.role }}</p><h2 class="mt-1 text-2xl font-semibold text-slate-950">{{ workspace.name }}</h2><p *ngIf="workspace.description" class="mt-1 text-sm text-slate-500">{{ workspace.description }}</p><p class="mt-2 text-xs leading-5 text-slate-500">El almacenamiento usa las cuentas configuradas por el propietario; las credenciales cloud no se muestran a los miembros.</p></div>
+            <div class="flex flex-wrap gap-2"><button *ngIf="canManage()" class="rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-sm font-semibold text-indigo-700 hover:bg-indigo-100" type="button" (click)="openManagement()">{{ managementOpen() ? 'Cerrar miembros' : 'Miembros' }}</button><input #fileInput class="hidden" type="file" (change)="upload($event)" /><button *ngIf="canWrite()" class="rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50" type="button" (click)="fileInput.click()">↑ Subir archivo</button><button *ngIf="canWrite()" class="rounded-lg bg-slate-900 px-3 py-2 text-sm font-semibold text-white hover:bg-slate-700" type="button" (click)="createFolder()">＋ Carpeta</button></div>
+          </div>
+        </section>
+
+        <section *ngIf="managementOpen() && canManage()" class="rounded-2xl border border-indigo-100 bg-white p-5 shadow-sm">
+          <div class="flex flex-wrap items-start justify-between gap-3"><div><h3 class="font-semibold text-slate-900">Miembros y permisos</h3><p class="mt-1 text-xs text-slate-500">OWNER conserva la propiedad. ADMIN no puede transferirla ni modificar otro administrador.</p></div></div>
+          <form class="mt-4 grid gap-2 sm:grid-cols-[minmax(0,1fr)_150px_auto]" (submit)="$event.preventDefault(); inviteMember()">
+            <label class="sr-only" for="workspace-member-email">Correo de la persona invitada</label><input id="workspace-member-email" class="rounded-lg border border-slate-200 px-3 py-2 text-sm" type="email" autocomplete="email" placeholder="persona@ejemplo.com" [value]="inviteEmail()" (input)="inviteEmail.set($any($event.target).value)" />
+            <label class="sr-only" for="workspace-member-role">Rol de la persona invitada</label><select id="workspace-member-role" class="rounded-lg border border-slate-200 px-3 py-2 text-sm" [value]="inviteRole()" (change)="setInviteRole($any($event.target).value)"><option value="MEMBER">Miembro</option><option value="VIEWER">Solo lectura</option><option *ngIf="workspace.role === 'OWNER'" value="ADMIN">Administrador</option></select>
+            <button class="rounded-lg bg-indigo-600 px-4 py-2 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-50" type="submit" [disabled]="busy()">Invitar</button>
+          </form>
+          <div *ngIf="invitation() as invite" class="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3"><p class="text-sm font-semibold text-amber-900">Invitación para {{ invite.email }} · vence {{ invite.expiresAt | date:'dd MMM yyyy' }}</p><p class="mt-1 text-xs text-amber-800">Copia el código y envíaselo manualmente. El código se muestra una sola vez.</p><code class="mt-2 block break-all rounded-lg bg-white p-2 text-xs text-slate-700">{{ invite.token }}</code><button class="mt-2 rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-xs font-semibold text-amber-900" type="button" (click)="copyInvitationToken()">Copiar código</button></div>
+          <div class="mt-4 divide-y divide-slate-100">
+            <div *ngFor="let member of members()" class="flex flex-wrap items-center justify-between gap-3 py-3">
+              <div class="min-w-0"><p class="truncate text-sm font-semibold text-slate-800">{{ member.user?.username ?? 'Cuenta' }} <span *ngIf="member.role === 'OWNER'" class="ml-1 rounded-full bg-amber-50 px-2 py-0.5 text-[10px] font-bold text-amber-700">Propietario</span></p><p class="truncate text-xs text-slate-500">{{ member.user?.email }}</p></div>
+              <div class="flex items-center gap-2"><select *ngIf="member.role !== 'OWNER'" class="rounded-lg border border-slate-200 px-2 py-1.5 text-xs" [value]="member.role" (change)="changeRole(member, $event)" aria-label="Cambiar rol del miembro"><option value="MEMBER">Miembro</option><option value="VIEWER">Solo lectura</option><option *ngIf="workspace.role === 'OWNER'" value="ADMIN">Administrador</option></select><span *ngIf="member.role === 'OWNER'" class="text-xs font-semibold text-slate-500">OWNER</span><button *ngIf="member.role !== 'OWNER'" class="text-xs font-semibold text-rose-600 hover:text-rose-800" type="button" (click)="removeMember(member)">Quitar</button></div>
+            </div>
+          </div>
+        </section>
+
+        <section class="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+          <div class="flex flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-5 py-4"><div class="flex min-w-0 items-center gap-2 overflow-x-auto text-sm"><button class="shrink-0 font-semibold text-indigo-600" type="button" (click)="goToBreadcrumb(-1)">{{ workspace.name }}</button><ng-container *ngFor="let crumb of breadcrumbs(); let index = index"><span class="text-slate-300">/</span><button class="shrink-0 font-semibold text-slate-800" type="button" (click)="goToBreadcrumb(index)">{{ crumb.name }}</button></ng-container></div><span class="text-xs text-slate-400">{{ nodes().length }} elementos</span></div>
+          <div *ngIf="loading()" class="space-y-3 p-5"><div *ngFor="let row of [1,2,3,4]" class="h-12 animate-pulse rounded-xl bg-slate-100"></div></div>
+          <div *ngIf="!loading() && !nodes().length" class="px-6 py-14 text-center"><div class="mx-auto grid h-12 w-12 place-items-center rounded-xl bg-slate-100 text-xl text-slate-400">▦</div><h3 class="mt-3 font-semibold text-slate-800">Esta carpeta está vacía</h3><p class="mt-1 text-sm text-slate-500">Sube un archivo o crea una carpeta para empezar.</p></div>
+          <div *ngIf="!loading() && nodes().length" class="divide-y divide-slate-100">
+            <div *ngFor="let node of nodes()" class="flex flex-wrap items-center justify-between gap-3 px-5 py-3 hover:bg-slate-50">
+              <div class="flex min-w-0 items-center gap-3"><span class="grid h-9 w-9 shrink-0 place-items-center rounded-lg" [class.bg-amber-50]="node.type === 'FOLDER'" [class.text-amber-600]="node.type === 'FOLDER'" [class.bg-slate-100]="node.type === 'FILE'">{{ node.type === 'FOLDER' ? '▰' : '▱' }}</span><button class="truncate text-left text-sm font-semibold text-slate-800 hover:text-indigo-600" type="button" (click)="node.type === 'FOLDER' ? openFolder(node) : download(node)">{{ node.name }}</button></div>
+              <div class="flex items-center gap-3"><span class="text-xs text-slate-400">{{ node.type === 'FOLDER' ? 'Carpeta' : formatBytes(node.size) }}</span><span class="rounded-full bg-slate-100 px-2 py-1 text-[10px] font-semibold text-slate-500">{{ node.status }}</span></div>
+            </div>
+          </div>
+        </section>
+      </ng-container>
+    </section>
+  </div>
+</main>

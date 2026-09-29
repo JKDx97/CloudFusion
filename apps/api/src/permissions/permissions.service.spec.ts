@@ -31,6 +31,17 @@ describe('PermissionsService', () => {
     expect(dataSource.query.mock.calls[0][0]).toContain('shares.revoked_at IS NULL');
   });
 
+  it('resolves workspace roles from membership without treating the storage owner as an implicit owner', async () => {
+    const { service, dataSource } = fixture();
+    dataSource.query.mockResolvedValue([{ permission: 'MANAGER' }]);
+
+    await expect(service.canShare('admin-id', 'workspace-node-id')).resolves.toBe(true);
+    const sql = dataSource.query.mock.calls[0][0] as string;
+    expect(sql).toContain('workspace_members');
+    expect(sql).toContain("WHEN 'ADMIN' THEN 'MANAGER'");
+    expect(sql).toContain('WHEN (SELECT workspace_id FROM ancestors WHERE depth = 0) IS NULL');
+  });
+
   it('denies access when the node does not exist or is in trash', async () => {
     const { service, dataSource } = fixture();
     dataSource.query.mockResolvedValue([]);
