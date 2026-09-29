@@ -28,6 +28,7 @@ import { ProtectionModule } from './protection/protection.module';
 import { RealtimeModule } from './realtime/realtime.module';
 import { ApiTokensModule } from './api-tokens/api-tokens.module';
 import { ApiToken } from './api-tokens/entities/api-token.entity';
+import { WebDavModule } from './webdav/webdav.module';
 
 @Module({
   imports: [
@@ -38,6 +39,7 @@ import { ApiToken } from './api-tokens/entities/api-token.entity';
     }),
     RealtimeModule,
     ApiTokensModule,
+    WebDavModule,
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 60 }]),
     TypeOrmModule.forRootAsync({
       inject: [ConfigService],

@@ -16,6 +16,7 @@ describe('ApiTokensService', () => {
     createQueryBuilder: jest.Mock;
   };
   let users: { findOne: jest.Mock };
+  let config: { get: jest.Mock };
   let service: ApiTokensService;
 
   beforeEach(() => {
@@ -28,7 +29,8 @@ describe('ApiTokensService', () => {
       createQueryBuilder: jest.fn(),
     };
     users = { findOne: jest.fn().mockResolvedValue({ id: userId }) };
-    service = new ApiTokensService(repository as never, users as never);
+    config = { get: jest.fn().mockReturnValue(90) };
+    service = new ApiTokensService(repository as never, users as never, config as never);
   });
 
   it('creates a cryptographically random token and returns its secret only in the create response', async () => {

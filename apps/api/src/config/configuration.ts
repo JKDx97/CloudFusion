@@ -2,9 +2,22 @@ export default () => ({
   app: {
     nodeEnv: process.env.NODE_ENV ?? 'development',
     frontendUrl: process.env.FRONTEND_URL ?? 'http://localhost:4200',
+    trustProxy: process.env.TRUST_PROXY === 'true'
+      ? true
+      : process.env.TRUST_PROXY === 'false' || !process.env.TRUST_PROXY
+        ? false
+        : /^\d+$/.test(process.env.TRUST_PROXY)
+          ? Number(process.env.TRUST_PROXY)
+          : process.env.TRUST_PROXY,
   },
   api: {
     port: Number(process.env.API_PORT ?? 3000),
+  },
+  apiTokens: {
+    defaultExpiryDays: Number(process.env.API_TOKEN_DEFAULT_EXPIRY_DAYS ?? 90),
+  },
+  webdav: {
+    enabled: process.env.WEBDAV_ENABLED !== 'false',
   },
   database: {
     host: process.env.DATABASE_HOST ?? 'localhost',

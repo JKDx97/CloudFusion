@@ -423,8 +423,25 @@ La primera entrega de Fase 6 incorpora credenciales revocables para clientes ext
 | GET | `/api-tokens` | Listar los tokens propios, sin secretos ni hashes |
 | DELETE | `/api-tokens/:id` | Revocar un token propio |
 
-Los permisos disponibles son `files:read`, `files:write`, `files:delete`, `webdav`, `s3`, `sync` y `desktop`. La gestión de tokens está lista; los protocolos WebDAV/S3 y el cliente Desktop se habilitarán en entregas posteriores y todavía no deben considerarse disponibles.
+Los permisos disponibles son `files:read`, `files:write`, `files:delete`, `webdav`, `s3`, `sync` y `desktop`. Los tokens vencen a los 90 días por defecto; cambia `API_TOKEN_DEFAULT_EXPIRY_DAYS` para ajustar ese plazo o usa `0` para desactivar el vencimiento predeterminado.
+
+### WebDAV sobre CloudFusion Drive
+
+La primera versión WebDAV opera sobre el sistema de archivos virtual (no accede directamente a Google Drive ni a OneDrive) y respeta versionado, cifrado, deduplicación y la cola de réplicas:
+
+| Método | Soporte actual |
+| --- | --- |
+| OPTIONS | Anuncia solo WebDAV clase 1 |
+| PROPFIND | Metadata y listado con profundidad 0 o 1 |
+| GET / HEAD | Descarga/metadata de archivos; failover de réplicas |
+| PUT | Carga nueva o versión protegida; usa el límite `CLOUD_UPLOAD_MAX_BYTES` |
+| MKCOL | Crea una carpeta virtual |
+| DELETE | Envía el elemento a la papelera virtual |
+
+`MOVE`, `COPY`, `LOCK`, `UNLOCK` y `Range` no están implementados. Se rechazan métodos no soportados y el servidor anuncia `Accept-Ranges: none`; no se simula compatibilidad. Crea un token con los permisos `webdav` y el permiso de archivos correspondiente. Los clientes con Bearer pueden usar `http://localhost:3000/dav` en desarrollo local; Basic Auth usa como usuario el ID de CloudFusion y como contraseña el token, únicamente por HTTPS. En producción exige HTTPS (también en el proxy inverso, configurando correctamente la detección de TLS). `WEBDAV_ENABLED=false` deshabilita el endpoint.
+
+La API S3 y el cliente Desktop todavía no están disponibles; sus permisos ya pueden seleccionarse para preparar futuras integraciones.
 
 ## Fuera del alcance actual
 
-CloudFusion todavía no implementa Dropbox, Box, MEGA, pCloud, P2P, BitTorrent, erasure coding/RAID, cifrado end-to-end de conocimiento cero, montaje local, WebDAV, gateway S3, CDN, Kubernetes ni aplicación móvil.
+CloudFusion todavía no implementa Dropbox, Box, MEGA, pCloud, P2P, BitTorrent, erasure coding/RAID, cifrado end-to-end de conocimiento cero, montaje local, WebDAV completo (MOVE/COPY/LOCK/UNLOCK/Range), gateway S3, CDN, Kubernetes ni aplicación móvil.

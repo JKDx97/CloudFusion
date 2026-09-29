@@ -1,5 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { BadRequestException, Injectable, NotFoundException, UnauthorizedException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, Repository } from 'typeorm';
 import { User, UserStatus } from '../users/entities/user.entity';
@@ -15,10 +16,16 @@ export class ApiTokensService {
   constructor(
     @InjectRepository(ApiToken) private readonly repository: Repository<ApiToken>,
     @InjectRepository(User) private readonly users: Repository<User>,
+    private readonly config: ConfigService,
   ) {}
 
   async create(userId: string, input: CreateApiTokenDto): Promise<PublicApiToken & { token: string }> {
-    const expiresAt = input.expiresAt ? new Date(input.expiresAt) : null;
+    const defaultExpiryDays = this.config.get<number>('apiTokens.defaultExpiryDays') ?? 90;
+    const expiresAt = input.expiresAt
+      ? new Date(input.expiresAt)
+      : defaultExpiryDays > 0
+        ? new Date(Date.now() + defaultExpiryDays * 24 * 60 * 60 * 1000)
+        : null;
     if (expiresAt && (!Number.isFinite(expiresAt.getTime()) || expiresAt.getTime() <= Date.now())) {
       throw new BadRequestException('API token expiration must be in the future');
     }

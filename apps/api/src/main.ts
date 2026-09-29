@@ -2,6 +2,7 @@ import { NestFactory } from '@nestjs/core';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
 import { Logger, ValidationPipe } from '@nestjs/common';
+import type { NextFunction, Request, Response } from 'express';
 import { ConfigService } from '@nestjs/config';
 import { AppModule } from './app.module';
 import { HttpErrorFilter } from './common/filters/http-error.filter';
@@ -13,9 +14,18 @@ async function bootstrap() {
   const port = config.get<number>('api.port') ?? 3000;
   const frontendUrl =
     config.get<string>('app.frontendUrl') ?? 'http://localhost:4200';
+  const trustProxy = config.get<boolean | number | string>('app.trustProxy') ?? false;
 
+  if (trustProxy) app.getHttpAdapter().getInstance().set('trust proxy', trustProxy);
   app.use(helmet());
-  app.enableCors({ origin: frontendUrl, credentials: true });
+  app.enableCors({ origin: frontendUrl, credentials: true, preflightContinue: true });
+  app.use((request: Request, response: Response, next: NextFunction) => {
+    if (request.method === 'OPTIONS' && request.header('access-control-request-method')) {
+      response.status(204).end();
+      return;
+    }
+    next();
+  });
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
