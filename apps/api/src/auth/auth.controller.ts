@@ -57,7 +57,7 @@ export class AuthController {
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Invalidate the current session' })
   logout(@Req() request: AuthenticatedRequest) {
-    return this.authService.logout(request.user.sub);
+    return this.authService.logout(request.user.sub, request.user.deviceId);
   }
 
   @Get('me')

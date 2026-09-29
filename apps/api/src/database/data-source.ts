@@ -20,6 +20,7 @@ import { ProtectionAlert } from '../protection/entities/protection-alert.entity'
 import { ApiToken } from '../api-tokens/entities/api-token.entity';
 import { ResourceShare } from '../permissions/entities/resource-share.entity';
 import { StorageTarget } from '../providers/object-storage/entities/storage-target.entity';
+import { UserDevice } from '../devices/entities/user-device.entity';
 
 export default new DataSource({
   type: 'postgres',
@@ -28,7 +29,7 @@ export default new DataSource({
   username: process.env.DATABASE_USER ?? 'cloudfusion',
   password: process.env.DATABASE_PASSWORD ?? 'change_me_local',
   database: process.env.DATABASE_NAME ?? 'cloudfusion',
-  entities: [User, CloudAccount, TransferJob, StorageRule, AuditLog, VirtualNode, StorageObject, StorageReplica, StoragePolicy, FileVersion, Snapshot, SnapshotEntry, SnapshotRestoreJob, BackupPolicy, BackupJob, BackupCopy, ProtectionAlert, ApiToken, ResourceShare, StorageTarget],
+  entities: [User, CloudAccount, TransferJob, StorageRule, AuditLog, VirtualNode, StorageObject, StorageReplica, StoragePolicy, FileVersion, Snapshot, SnapshotEntry, SnapshotRestoreJob, BackupPolicy, BackupJob, BackupCopy, ProtectionAlert, ApiToken, ResourceShare, StorageTarget, UserDevice],
   migrations: [__dirname + '/migrations/*{.ts,.js}'],
   synchronize: false,
 });

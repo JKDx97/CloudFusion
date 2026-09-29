@@ -1,4 +1,5 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Type } from 'class-transformer';
 import {
   IsEmail,
   IsNotEmpty,
@@ -6,7 +7,10 @@ import {
   Matches,
   MaxLength,
   MinLength,
+  IsOptional,
+  ValidateNested,
 } from 'class-validator';
+import { RegisterDeviceDto } from '../../devices/dto/register-device.dto';
 
 export class RegisterDto {
   @ApiProperty({ example: 'ana@example.com' })
@@ -31,4 +35,10 @@ export class RegisterDto {
   @MinLength(8)
   @MaxLength(128)
   password!: string;
+
+  @ApiPropertyOptional({ type: RegisterDeviceDto, description: 'Optional desktop/NAS installation metadata for a device-bound session.' })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => RegisterDeviceDto)
+  device?: RegisterDeviceDto;
 }

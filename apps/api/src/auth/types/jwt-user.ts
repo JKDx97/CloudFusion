@@ -6,4 +6,5 @@ export interface JwtUser {
   username: string;
   role: UserRole;
   type?: 'access' | 'refresh';
+  deviceId?: string;
 }
