@@ -4,7 +4,7 @@ import { Observable, map } from 'rxjs';
 import { AuthService } from '../auth/auth.service';
 import { environment } from '../../../environments/environment';
 import { ApiResponse } from '../../shared/models/api-response.model';
-import { BackupJobRecord, BackupPolicyRecord, CloudAccount, CloudAccountImpactRecord, CloudFile, CloudProvider, CloudSearchResponse, CloudStorageSummary, CreatePublicShareResult, CreateShareInvitationResult, CreateWorkspaceInvitationResult, DataProtectionEventRecord, FileVersionRecord, ProtectionAlertRecord, ProtectionOverviewRecord, PublicShareExpiry, PublicShareInfo, PublicSharePage, PublicSharePermission, PublicShareRecord, ResourceShareRecord, ResourceShareRole, ShareInvitationPage, SharePage, ShareUserSearchResult, SnapshotEntryRecord, SnapshotRecord, SnapshotRestoreJobRecord, StorageRule, TransferJob, TransferProgressEvent, TransferOperation, VirtualNode, WorkspaceInvitationRecord, WorkspaceMemberRecord, WorkspacePage, WorkspaceRecord, WorkspaceRole } from '../../shared/models/cloud.model';
+import { BackupJobRecord, BackupPolicyRecord, CloudAccount, CloudAccountImpactRecord, CloudFile, CloudProvider, CloudSearchResponse, CloudStorageSummary, ConnectS3AccountInput, CreatePublicShareResult, CreateShareInvitationResult, CreateWorkspaceInvitationResult, DataProtectionEventRecord, FileVersionRecord, ProviderConnectionTestResult, ProviderDescriptor, ProtectionAlertRecord, ProtectionOverviewRecord, PublicShareExpiry, PublicShareInfo, PublicSharePage, PublicSharePermission, PublicShareRecord, ResourceShareRecord, ResourceShareRole, S3TargetInput, ShareInvitationPage, SharePage, ShareUserSearchResult, SnapshotEntryRecord, SnapshotRecord, SnapshotRestoreJobRecord, StorageRule, StorageTargetRecord, TransferJob, TransferProgressEvent, TransferOperation, VirtualNode, WorkspaceInvitationRecord, WorkspaceMemberRecord, WorkspacePage, WorkspaceRecord, WorkspaceRole } from '../../shared/models/cloud.model';
 
 @Injectable({ providedIn: 'root' })
 export class CloudService {
@@ -14,6 +14,30 @@ export class CloudService {
 
   getAccounts(): Observable<CloudAccount[]> {
     return this.http.get<ApiResponse<CloudAccount[]>>(`${this.apiUrl}/cloud-accounts`).pipe(map((response) => response.data));
+  }
+
+  getProviders(): Observable<ProviderDescriptor[]> {
+    return this.http.get<ApiResponse<ProviderDescriptor[]>>(`${this.apiUrl}/providers`).pipe(map((response) => response.data));
+  }
+
+  testS3Connection(input: ConnectS3AccountInput): Observable<ProviderConnectionTestResult> {
+    return this.http.post<ApiResponse<ProviderConnectionTestResult>>(`${this.apiUrl}/cloud-accounts/s3/test-connection`, input).pipe(map((response) => response.data));
+  }
+
+  connectS3Account(input: ConnectS3AccountInput): Observable<{ account: CloudAccount; target: StorageTargetRecord; health: ProviderConnectionTestResult }> {
+    return this.http.post<ApiResponse<{ account: CloudAccount; target: StorageTargetRecord; health: ProviderConnectionTestResult }>>(`${this.apiUrl}/cloud-accounts/s3/connect`, input).pipe(map((response) => response.data));
+  }
+
+  getStorageTargets(accountId: string): Observable<StorageTargetRecord[]> {
+    return this.http.get<ApiResponse<StorageTargetRecord[]>>(`${this.apiUrl}/cloud-accounts/s3/${accountId}/targets`).pipe(map((response) => response.data));
+  }
+
+  addStorageTarget(accountId: string, input: S3TargetInput & { name?: string }): Observable<{ target: StorageTargetRecord; health: ProviderConnectionTestResult }> {
+    return this.http.post<ApiResponse<{ target: StorageTargetRecord; health: ProviderConnectionTestResult }>>(`${this.apiUrl}/cloud-accounts/s3/${accountId}/targets`, input).pipe(map((response) => response.data));
+  }
+
+  testStorageTarget(accountId: string, targetId: string, verifyWrite = false): Observable<ProviderConnectionTestResult> {
+    return this.http.post<ApiResponse<ProviderConnectionTestResult>>(`${this.apiUrl}/cloud-accounts/s3/${accountId}/targets/${targetId}/test-connection`, { verifyWrite }).pipe(map((response) => response.data));
   }
 
   getStorageSummary(): Observable<CloudStorageSummary> {

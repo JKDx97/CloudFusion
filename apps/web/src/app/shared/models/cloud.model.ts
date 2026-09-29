@@ -18,6 +18,81 @@ export type CloudProvider =
   | 'MEDIAFIRE';
 export type CloudAccountStatus = 'CONNECTED' | 'REAUTH_REQUIRED' | 'DISCONNECTED' | 'DEGRADED' | 'RATE_LIMITED' | 'UNAVAILABLE' | 'DISABLED';
 
+export type ProviderCategory = 'CONSUMER_DRIVE' | 'OBJECT_STORAGE' | 'SELF_HOSTED' | 'EXPERIMENTAL';
+export type ProviderSupportStatus = 'STABLE' | 'BETA' | 'EXPERIMENTAL' | 'COMING_SOON' | 'UNAVAILABLE';
+
+export interface ProviderCapabilities {
+  list: boolean;
+  folders: boolean;
+  search: boolean;
+  rename: boolean;
+  move: boolean;
+  copy: boolean;
+  multipartUpload: boolean;
+  resumableUpload: boolean;
+  rangeDownload: boolean;
+  nativeVersioning: boolean;
+  checksums: boolean;
+  quota: boolean;
+  thumbnails: boolean;
+  sharing: boolean;
+  serverSideCopy: boolean;
+}
+
+export interface ProviderDescriptor {
+  id: CloudProvider;
+  displayName: string;
+  category: ProviderCategory;
+  icon: string;
+  authenticationType: 'OAUTH2' | 'ACCESS_KEY' | 'API_TOKEN' | 'SERVICE_ACCOUNT' | 'CUSTOM' | 'UNKNOWN';
+  supportStatus: ProviderSupportStatus;
+  capabilities: ProviderCapabilities;
+  supportsQuota: boolean;
+  supportsBuckets: boolean;
+  supportsFolders: boolean;
+}
+
+export interface ProviderConnectionTestResult {
+  success: boolean;
+  latencyMs: number;
+  read: boolean;
+  write?: boolean;
+  cleanup?: boolean;
+  errorCode?: string;
+}
+
+export interface StorageTargetRecord {
+  id: string;
+  cloudAccountId: string;
+  type: string;
+  name: string;
+  remoteIdentifier: string;
+  region: string | null;
+  endpoint: string | null;
+  prefix: string;
+  forcePathStyle: boolean;
+  enabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface S3TargetInput {
+  bucket: string;
+  region: string;
+  endpoint?: string;
+  prefix?: string;
+  forcePathStyle?: boolean;
+  verifyWrite?: boolean;
+}
+
+export interface ConnectS3AccountInput extends S3TargetInput {
+  provider: CloudProvider;
+  accountName?: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  sessionToken?: string;
+}
+
 export interface CloudStorage {
   used: number;
   total: number | null;

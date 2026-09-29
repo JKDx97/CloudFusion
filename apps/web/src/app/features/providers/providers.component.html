@@ -1,0 +1,73 @@
+<main class="min-h-screen bg-[#f7f8fc] px-5 py-6 text-slate-900 lg:px-8">
+  <div class="mx-auto max-w-7xl">
+    <header class="flex flex-wrap items-center justify-between gap-3">
+      <a routerLink="/drive" class="text-sm font-semibold text-indigo-600">← Volver a CloudFusion Drive</a>
+      <a routerLink="/dashboard" class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50">Explorador cloud</a>
+    </header>
+    <div class="mt-5">
+      <p class="text-sm font-semibold uppercase tracking-[0.18em] text-indigo-600">Cuentas e integraciones</p>
+      <h1 class="mt-2 text-3xl font-semibold tracking-tight text-slate-950">Proveedores cloud</h1>
+      <p class="mt-2 max-w-3xl text-sm leading-6 text-slate-500">Consulta el catálogo, conecta almacenamiento compatible con S3 y administra varios buckets por cuenta. Las claves se envían al backend para cifrarse; nunca se guardan en el navegador.</p>
+    </div>
+
+    @if (notice()) { <div class="mt-5 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800" role="status">{{ notice() }}</div> }
+    @if (error()) { <div class="mt-5 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800" role="alert">{{ error() }}</div> }
+    @if (loading()) { <div class="mt-6 rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-500">Cargando catálogo…</div> }
+    @else {
+      <section class="mt-6">
+        <div class="mb-3 flex items-end justify-between gap-3"><div><h2 class="text-lg font-semibold text-slate-900">Catálogo</h2><p class="mt-1 text-sm text-slate-500">El estado y las funciones reflejan lo declarado por CloudFusion, no una verificación de tu cuenta.</p></div><button type="button" class="text-sm font-semibold text-indigo-600" (click)="load()">Actualizar</button></div>
+        <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          @for (provider of catalog(); track provider.id) {
+            <article class="rounded-2xl border border-slate-200/80 bg-white p-4 shadow-sm">
+              <div class="flex items-start justify-between gap-3"><div class="min-w-0"><h3 class="truncate font-semibold text-slate-900">{{ provider.displayName }}</h3><p class="mt-1 text-xs text-slate-500">{{ categoryLabel(provider.category) }}</p></div><span class="shrink-0 rounded-full bg-indigo-50 px-2.5 py-1 text-[11px] font-bold text-indigo-700">{{ supportLabel(provider.supportStatus) }}</span></div>
+              <p class="mt-3 text-xs text-slate-500">Acceso: {{ provider.authenticationType }}</p>
+              @if (capabilityLabels(provider).length) { <div class="mt-3 flex flex-wrap gap-1.5">@for (capability of capabilityLabels(provider); track capability) { <span class="rounded-lg bg-slate-100 px-2 py-1 text-[10px] font-medium text-slate-600">{{ capability }}</span> }</div> }
+            </article>
+          }
+        </div>
+      </section>
+
+      <div class="mt-8 grid items-start gap-5 xl:grid-cols-[1fr_1fr]">
+        <form class="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm" (submit)="$event.preventDefault(); connectAccount()">
+          <div><h2 class="text-lg font-semibold text-slate-900">Conectar almacenamiento S3</h2><p class="mt-1 text-sm leading-5 text-slate-500">Empieza con un bucket; podrás añadir más destinos a la misma cuenta.</p></div>
+          <div class="mt-5 grid gap-4 sm:grid-cols-2">
+            <label class="text-xs font-semibold text-slate-600">Proveedor
+              <select #providerSelect class="mt-1.5 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-normal" [value]="provider" (change)="selectProvider(providerSelect.value)">@for (option of providerOptions(); track option.id) { <option [value]="option.id">{{ option.displayName }} · {{ supportLabel(option.supportStatus) }}</option> }</select>
+            </label>
+            <label class="text-xs font-semibold text-slate-600">Nombre de cuenta (opcional)<input class="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm font-normal" [(ngModel)]="accountName" name="accountName" maxlength="255" placeholder="Producción" /></label>
+            <label class="text-xs font-semibold text-slate-600">Bucket / contenedor<input class="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm font-normal" [(ngModel)]="bucket" name="bucket" autocomplete="off" maxlength="255" required /></label>
+            <label class="text-xs font-semibold text-slate-600">Región<input class="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm font-normal" [(ngModel)]="region" name="region" autocomplete="off" maxlength="64" required placeholder="us-east-1 o auto" /></label>
+            @if (needsEndpoint(provider)) { <label class="text-xs font-semibold text-slate-600 sm:col-span-2">Endpoint S3<input class="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm font-normal" [(ngModel)]="endpoint" name="endpoint" type="url" autocomplete="off" maxlength="2048" required placeholder="https://..." /><span class="mt-1 block font-normal text-slate-400">Usa el endpoint oficial de tu proveedor; endpoints privados requieren configuración explícita del servidor.</span></label> }
+            <label class="text-xs font-semibold text-slate-600 sm:col-span-2">Prefijo administrado (opcional)<input class="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm font-normal" [(ngModel)]="prefix" name="prefix" autocomplete="off" maxlength="1024" placeholder="cloudfusion/" /></label>
+            <label class="text-xs font-semibold text-slate-600">Access Key ID<input class="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-2.5 font-mono text-sm font-normal" [(ngModel)]="accessKeyId" name="accessKeyId" autocomplete="off" maxlength="512" required /></label>
+            <label class="text-xs font-semibold text-slate-600">Secret Access Key<input class="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-2.5 font-mono text-sm font-normal" [(ngModel)]="secretAccessKey" name="secretAccessKey" type="password" autocomplete="new-password" maxlength="4096" required /></label>
+            <label class="text-xs font-semibold text-slate-600 sm:col-span-2">Token de sesión temporal (opcional)<input class="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-2.5 font-mono text-sm font-normal" [(ngModel)]="sessionToken" name="sessionToken" type="password" autocomplete="new-password" maxlength="4096" /></label>
+          </div>
+          <label class="mt-4 flex items-start gap-2 text-xs leading-5 text-slate-600"><input class="mt-1" type="checkbox" [(ngModel)]="verifyWrite" name="verifyWrite" /><span>Verificar escritura creando y borrando un archivo temporal pequeño. Por defecto solo se prueba lectura.</span></label>
+          <div class="mt-5 flex flex-wrap gap-2"><button class="rounded-xl border border-indigo-200 bg-indigo-50 px-4 py-2.5 text-sm font-semibold text-indigo-700 hover:bg-indigo-100 disabled:opacity-50" type="button" (click)="testConnection()" [disabled]="testing() || busy()">{{ testing() ? 'Probando…' : 'Probar conexión' }}</button><button class="rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white hover:bg-slate-700 disabled:opacity-50" type="submit" [disabled]="busy() || testing()">{{ busy() ? 'Conectando…' : 'Guardar cuenta' }}</button></div>
+          @if (connectionHealth(); as health) { <p class="mt-3 text-xs text-slate-500">Última prueba: {{ health.success && health.read ? 'lectura correcta' : 'falló' }} · {{ health.latencyMs }} ms<span *ngIf="health.write === true"> · escritura verificada</span></p> }
+        </form>
+
+        <section class="space-y-5">
+          <div class="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm">
+            <div class="flex flex-wrap items-start justify-between gap-3"><div><h2 class="text-lg font-semibold text-slate-900">Cuentas conectadas</h2><p class="mt-1 text-sm text-slate-500">Los datos secretos no se muestran aquí.</p></div><span class="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-600">{{ s3Accounts().length }}</span></div>
+            @if (!s3Accounts().length) { <p class="mt-4 rounded-xl border border-dashed border-slate-300 p-4 text-sm text-slate-500">Aún no hay cuentas de almacenamiento S3.</p> }
+            @else { <label class="mt-4 block text-xs font-semibold text-slate-600">Cuenta seleccionada<select #accountSelect class="mt-1.5 w-full rounded-xl border border-slate-200 bg-white px-3 py-2.5 text-sm font-normal" [value]="targetAccountId" (change)="selectTargetAccount(accountSelect.value)">@for (account of s3Accounts(); track account.id) { <option [value]="account.id">{{ account.displayName }} · {{ account.status }}</option> }</select></label>
+              <div class="mt-4 space-y-2">@for (target of targets(); track target.id) { <article class="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-100 p-3"><div class="min-w-0"><p class="truncate text-sm font-semibold text-slate-800">{{ target.name }}</p><p class="truncate text-xs text-slate-500">{{ target.remoteIdentifier }} · {{ target.region }}<span *ngIf="target.prefix"> · {{ target.prefix }}</span></p></div><button class="rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50" type="button" (click)="checkTarget(target)">Probar lectura</button></article> }</div>
+            }
+          </div>
+
+          @if (s3Accounts().length) {
+            <form class="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm" (submit)="$event.preventDefault(); addTarget()">
+              <h2 class="text-lg font-semibold text-slate-900">Añadir otro bucket</h2>
+              <p class="mt-1 text-sm leading-5 text-slate-500">Se usarán las credenciales cifradas de la cuenta seleccionada.</p>
+              <div class="mt-4 grid gap-3 sm:grid-cols-2"><label class="text-xs font-semibold text-slate-600">Bucket<input class="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm font-normal" [(ngModel)]="targetBucket" name="targetBucket" autocomplete="off" required /></label><label class="text-xs font-semibold text-slate-600">Nombre visible<input class="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm font-normal" [(ngModel)]="targetName" name="targetName" placeholder="Opcional" /></label><label class="text-xs font-semibold text-slate-600">Región<input class="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm font-normal" [(ngModel)]="targetRegion" name="targetRegion" required /></label><label class="text-xs font-semibold text-slate-600">Endpoint<input class="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm font-normal" [(ngModel)]="targetEndpoint" name="targetEndpoint" type="url" placeholder="Si aplica" /></label><label class="text-xs font-semibold text-slate-600 sm:col-span-2">Prefijo administrado<input class="mt-1.5 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm font-normal" [(ngModel)]="targetPrefix" name="targetPrefix" placeholder="Opcional" /></label></div>
+              <label class="mt-3 flex items-start gap-2 text-xs leading-5 text-slate-600"><input class="mt-1" type="checkbox" [(ngModel)]="targetVerifyWrite" name="targetVerifyWrite" /><span>Verificar escritura creando y borrando un archivo temporal.</span></label>
+              <button class="mt-4 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-50" type="submit" [disabled]="busy()">{{ busy() ? 'Guardando…' : 'Añadir destino' }}</button>
+            </form>
+          }
+        </section>
+      </div>
+    }
+  </div>
+</main>
