@@ -1,5 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
-import { IsEnum, IsString, IsUUID, MaxLength, MinLength } from 'class-validator';
+import { IsBase64, IsEnum, IsOptional, IsString, IsUUID, MaxLength, MinLength } from 'class-validator';
 import { DevicePlatform } from '../enums/device-platform.enum';
 
 export class RegisterDeviceDto {
@@ -21,4 +21,16 @@ export class RegisterDeviceDto {
   @IsString()
   @MaxLength(64)
   clientVersion?: string;
+
+  @ApiProperty({ required: false, description: 'Libp2p PeerId derived from the Ed25519 public key.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  peerId?: string;
+
+  @ApiProperty({ required: false, description: 'Base64-encoded libp2p Ed25519 public key protobuf.' })
+  @IsOptional()
+  @IsBase64()
+  @MaxLength(128)
+  peerPublicKey?: string;
 }

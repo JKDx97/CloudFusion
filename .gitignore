@@ -5,6 +5,8 @@ dist/
 coverage/
 .angular/
 apps/web/.angular/
+target/
+apps/desktop/gen/schemas/
 
 # Environment files and secrets
 .env

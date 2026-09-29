@@ -18,6 +18,12 @@ export class DevicesController {
     return this.devices.list(request.user.sub);
   }
 
+  @Get('mesh-peers')
+  @ApiOperation({ summary: 'List the authenticated user’s enabled LAN mesh peers' })
+  listMeshPeers(@Req() request: AuthenticatedRequest) {
+    return this.devices.listMeshPeers(request.user.sub);
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Get a device registered to the authenticated user' })
   get(@Req() request: AuthenticatedRequest, @Param('id') id: string) {

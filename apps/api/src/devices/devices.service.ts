@@ -1,10 +1,11 @@
-import { ConflictException, Injectable, NotFoundException, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, Injectable, NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { IsNull, Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
 import { RegisterDeviceDto } from './dto/register-device.dto';
 import { UpdateDeviceSettingsDto } from './dto/update-device-settings.dto';
 import { UserDevice } from './entities/user-device.entity';
+import { isMatchingEd25519PeerIdentity } from './peer-identity';
 
 export type PublicDevice = Omit<UserDevice, 'installationId' | 'refreshTokenHash' | 'peerPublicKey'>;
 
@@ -16,6 +17,7 @@ export class DevicesService {
   ) {}
 
   async registerForAuthentication(userId: string, dto: RegisterDeviceDto): Promise<UserDevice> {
+    this.validatePeerIdentity(dto);
     let device = await this.devices.findOne({ where: { userId, installationId: dto.installationId } });
     if (device?.revokedAt) throw new UnauthorizedException('This device has been revoked');
 
@@ -23,6 +25,10 @@ export class DevicesService {
       device.name = dto.name.trim();
       device.platform = dto.platform;
       device.clientVersion = dto.clientVersion?.trim() || null;
+      if (dto.peerId && dto.peerPublicKey) {
+        device.peerId = dto.peerId;
+        device.peerPublicKey = dto.peerPublicKey;
+      }
       device.lastSeenAt = new Date();
     } else {
       device = this.devices.create({
@@ -31,8 +37,8 @@ export class DevicesService {
         name: dto.name.trim(),
         platform: dto.platform,
         clientVersion: dto.clientVersion?.trim() || null,
-        peerId: null,
-        peerPublicKey: null,
+        peerId: dto.peerId ?? null,
+        peerPublicKey: dto.peerPublicKey ?? null,
         refreshTokenHash: null,
         p2pEnabled: false,
         lanDiscoveryEnabled: true,
@@ -60,6 +66,23 @@ export class DevicesService {
   async list(userId: string): Promise<PublicDevice[]> {
     const devices = await this.devices.find({ where: { userId }, order: { lastSeenAt: 'DESC', createdAt: 'DESC' } });
     return devices.map((device) => this.toPublicDevice(device));
+  }
+
+  async listMeshPeers(userId: string) {
+    const devices = await this.devices.find({
+      where: { userId, revokedAt: IsNull(), p2pEnabled: true, lanDiscoveryEnabled: true },
+      order: { lastSeenAt: 'DESC' },
+    });
+    return devices
+      .filter((device) => device.peerId && device.peerPublicKey)
+      .map(({ id, name, platform, peerId, peerPublicKey, lastSeenAt }) => ({
+        id,
+        name,
+        platform,
+        peerId: peerId as string,
+        peerPublicKey: peerPublicKey as string,
+        lastSeenAt,
+      }));
   }
 
   async getActive(userId: string, deviceId: string): Promise<UserDevice> {
@@ -124,5 +147,16 @@ export class DevicesService {
   private toPublicDevice(device: UserDevice): PublicDevice {
     const { installationId: _installationId, refreshTokenHash: _refreshTokenHash, peerPublicKey: _peerPublicKey, ...publicDevice } = device;
     return publicDevice;
+  }
+
+  private validatePeerIdentity(dto: RegisterDeviceDto): void {
+    const hasPeerId = !!dto.peerId;
+    const hasPeerPublicKey = !!dto.peerPublicKey;
+    if (hasPeerId !== hasPeerPublicKey) {
+      throw new BadRequestException('Peer ID and public key must be supplied together');
+    }
+    if (hasPeerId && !isMatchingEd25519PeerIdentity(dto.peerId!, dto.peerPublicKey!)) {
+      throw new BadRequestException('Peer ID does not match the supplied Ed25519 public key');
+    }
   }
 }
