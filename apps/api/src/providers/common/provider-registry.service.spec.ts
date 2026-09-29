@@ -6,10 +6,11 @@ import { ProviderCategory, ProviderId, ProviderSupportStatus } from './provider-
 describe('ProviderRegistryService', () => {
   const googleDrive = { provider: CloudProvider.GOOGLE_DRIVE } as CloudProviderAdapter;
   const oneDrive = { provider: CloudProvider.ONEDRIVE } as CloudProviderAdapter;
+  const dropboxAdapter = { provider: CloudProvider.DROPBOX } as CloudProviderAdapter;
   let registry: ProviderRegistryService;
 
   beforeEach(() => {
-    registry = new ProviderRegistryService(googleDrive as never, oneDrive as never);
+    registry = new ProviderRegistryService(googleDrive as never, oneDrive as never, dropboxAdapter as never);
   });
 
   it('publishes a safe catalog with explicitly unverified and coming-soon entries', () => {
@@ -21,7 +22,8 @@ describe('ProviderRegistryService', () => {
 
     expect(google?.supportStatus).toBe(ProviderSupportStatus.BETA);
     expect(google?.capabilities.search).toBe(true);
-    expect(dropbox?.supportStatus).toBe(ProviderSupportStatus.COMING_SOON);
+    expect(dropbox?.supportStatus).toBe(ProviderSupportStatus.BETA);
+    expect(dropbox?.capabilities).toEqual(expect.objectContaining({ list: true, folders: true, search: true, rename: true, resumableUpload: true, quota: true }));
     expect(s3?.category).toBe(ProviderCategory.OBJECT_STORAGE);
     expect(s3?.supportStatus).toBe(ProviderSupportStatus.BETA);
     expect(s3?.capabilities).toEqual(expect.objectContaining({ list: true, multipartUpload: true, rangeDownload: true }));
@@ -41,6 +43,6 @@ describe('ProviderRegistryService', () => {
   it('resolves only adapters that are registered', () => {
     expect(registry.resolve(CloudProvider.GOOGLE_DRIVE)).toBe(googleDrive);
     expect(registry.resolve(CloudProvider.ONEDRIVE)).toBe(oneDrive);
-    expect(() => registry.resolve('DROPBOX' as CloudProvider)).toThrow('PROVIDER_UNAVAILABLE');
+    expect(registry.resolve(CloudProvider.DROPBOX)).toBe(dropboxAdapter);
   });
 });

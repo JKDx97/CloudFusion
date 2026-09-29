@@ -2,7 +2,7 @@ import { CommonModule } from '@angular/common';
 import { Component, DestroyRef, OnInit, computed, inject, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { FormsModule } from '@angular/forms';
-import { RouterLink } from '@angular/router';
+import { ActivatedRoute, RouterLink } from '@angular/router';
 import { CloudService } from '../../core/cloud/cloud.service';
 import { CloudAccount, CloudProvider, ConnectS3AccountInput, ProviderConnectionTestResult, ProviderDescriptor, StorageTargetRecord } from '../../shared/models/cloud.model';
 
@@ -20,6 +20,7 @@ const S3_PROVIDERS: CloudProvider[] = [
 export class ProvidersComponent implements OnInit {
   private readonly cloud = inject(CloudService);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly route = inject(ActivatedRoute);
 
   readonly catalog = signal<ProviderDescriptor[]>([]);
   readonly accounts = signal<CloudAccount[]>([]);
@@ -27,6 +28,7 @@ export class ProvidersComponent implements OnInit {
   readonly s3Accounts = computed(() => this.accounts().filter((account) =>
     account.credentialType === 'ACCESS_KEY' && S3_PROVIDERS.includes(account.provider),
   ));
+  readonly oauthAccounts = computed(() => this.accounts().filter((account) => account.credentialType === 'OAUTH2'));
   readonly providerOptions = computed(() => this.catalog().filter((provider) =>
     S3_PROVIDERS.includes(provider.id) && provider.supportStatus !== 'UNAVAILABLE',
   ));
@@ -56,7 +58,15 @@ export class ProvidersComponent implements OnInit {
   targetPrefix = '';
   targetVerifyWrite = false;
 
-  ngOnInit(): void { this.load(); }
+  ngOnInit(): void {
+    const connectionId = this.route.snapshot.queryParamMap.get('connected');
+    if (connectionId) this.notice.set('La cuenta de Dropbox se conectó correctamente.');
+    const cloudError = this.route.snapshot.queryParamMap.get('cloudError');
+    if (cloudError === 'provider_not_configured') this.error.set('Dropbox aún no está configurado en el servidor.');
+    else if (cloudError === 'oauth_cancelled') this.error.set('Se canceló la autorización de Dropbox.');
+    else if (cloudError) this.error.set('No se pudo completar la conexión con Dropbox. Revisa la configuración OAuth e inténtalo de nuevo.');
+    this.load();
+  }
 
   load(): void {
     this.loading.set(true);
@@ -82,6 +92,24 @@ export class ProvidersComponent implements OnInit {
     this.provider = value as CloudProvider;
     this.region = this.provider === 'CLOUDFLARE_R2' ? 'auto' : 'us-east-1';
     this.endpoint = '';
+  }
+
+  canConnectOAuth(provider: ProviderDescriptor): boolean {
+    return provider.authenticationType === 'OAUTH2' && provider.supportStatus === 'BETA'
+      && ['GOOGLE_DRIVE', 'ONEDRIVE', 'DROPBOX'].includes(provider.id);
+  }
+
+  connectOAuth(provider: ProviderDescriptor): void {
+    if (!this.canConnectOAuth(provider) || this.busy()) return;
+    this.error.set(null);
+    this.busy.set(true);
+    this.cloud.connect(provider.id).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: (url) => window.location.assign(url),
+      error: () => {
+        this.busy.set(false);
+        this.error.set(`No se pudo iniciar la autorización de ${provider.displayName}. Comprueba que esté configurado en el servidor.`);
+      },
+    });
   }
 
   needsEndpoint(provider: CloudProvider): boolean { return provider !== 'AWS_S3'; }

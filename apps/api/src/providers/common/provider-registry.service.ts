@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { GoogleDriveAdapter } from '../google-drive/google-drive.adapter';
 import { OneDriveAdapter } from '../onedrive/onedrive.adapter';
+import { DropboxAdapter } from '../dropbox/dropbox.adapter';
 import { CloudProvider } from './cloud-provider.enum';
 import { CloudProviderAdapter } from './cloud-provider.interface';
 import { ProviderErrorCode, ProviderException } from './provider-error';
@@ -27,7 +28,14 @@ const DRIVE_CAPABILITIES: Partial<ProviderCapabilities> = {
 const CATALOG: ProviderDescriptor[] = [
   descriptor(ProviderId.GOOGLE_DRIVE, 'Google Drive', ProviderCategory.CONSUMER_DRIVE, ProviderAuthenticationType.OAUTH2, ProviderSupportStatus.BETA, DRIVE_CAPABILITIES, { supportsQuota: true, supportsFolders: true }),
   descriptor(ProviderId.ONEDRIVE, 'OneDrive', ProviderCategory.CONSUMER_DRIVE, ProviderAuthenticationType.OAUTH2, ProviderSupportStatus.BETA, DRIVE_CAPABILITIES, { supportsQuota: true, supportsFolders: true }),
-  descriptor(ProviderId.DROPBOX, 'Dropbox', ProviderCategory.CONSUMER_DRIVE, ProviderAuthenticationType.OAUTH2, ProviderSupportStatus.COMING_SOON, {}, { supportsQuota: true, supportsFolders: true }),
+  descriptor(ProviderId.DROPBOX, 'Dropbox', ProviderCategory.CONSUMER_DRIVE, ProviderAuthenticationType.OAUTH2, ProviderSupportStatus.BETA, {
+    list: true,
+    folders: true,
+    search: true,
+    rename: true,
+    resumableUpload: true,
+    quota: true,
+  }, { supportsQuota: true, supportsFolders: true }),
   descriptor(ProviderId.BOX, 'Box', ProviderCategory.CONSUMER_DRIVE, ProviderAuthenticationType.OAUTH2, ProviderSupportStatus.COMING_SOON, {}, { supportsQuota: true, supportsFolders: true }),
   descriptor(ProviderId.PCLOUD, 'pCloud', ProviderCategory.CONSUMER_DRIVE, ProviderAuthenticationType.OAUTH2, ProviderSupportStatus.COMING_SOON, {}, { supportsQuota: true, supportsFolders: true }),
   descriptor(ProviderId.MEGA, 'MEGA', ProviderCategory.CONSUMER_DRIVE, ProviderAuthenticationType.UNKNOWN, ProviderSupportStatus.COMING_SOON, {}, { supportsQuota: true, supportsFolders: true }),
@@ -49,9 +57,10 @@ export class ProviderRegistryService {
   private readonly adapters = new Map<CloudProvider, CloudProviderAdapter>();
   private readonly descriptors = new Map(CATALOG.map((entry) => [entry.id, entry]));
 
-  constructor(googleDrive: GoogleDriveAdapter, oneDrive: OneDriveAdapter) {
+  constructor(googleDrive: GoogleDriveAdapter, oneDrive: OneDriveAdapter, dropbox: DropboxAdapter) {
     this.registerAdapter(googleDrive);
     this.registerAdapter(oneDrive);
+    this.registerAdapter(dropbox);
   }
 
   getCatalog(): ProviderDescriptor[] {

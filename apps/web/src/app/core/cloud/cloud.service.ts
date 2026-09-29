@@ -75,7 +75,8 @@ export class CloudService {
   }
 
   connect(provider: CloudProvider): Observable<string> {
-    const providerPath = provider === 'GOOGLE_DRIVE' ? 'google' : 'onedrive';
+    const providerPath = ({ GOOGLE_DRIVE: 'google', ONEDRIVE: 'onedrive', DROPBOX: 'dropbox' } as const)[provider as 'GOOGLE_DRIVE' | 'ONEDRIVE' | 'DROPBOX'];
+    if (!providerPath) throw new Error(`OAuth connection is not supported for ${provider}`);
     return this.http.post<ApiResponse<{ authorizationUrl: string }>>(`${this.apiUrl}/cloud-accounts/${providerPath}/connect`, {})
       .pipe(map((response) => response.data.authorizationUrl));
   }

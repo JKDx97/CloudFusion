@@ -62,6 +62,14 @@ export default () => ({
         process.env.MICROSOFT_REDIRECT_URI ??
         'http://localhost:3000/cloud-accounts/onedrive/callback',
     },
+    dropbox: {
+      clientId: process.env.DROPBOX_CLIENT_ID,
+      clientSecret: process.env.DROPBOX_CLIENT_SECRET,
+      redirectUri:
+        process.env.DROPBOX_REDIRECT_URI ??
+        'http://localhost:3000/cloud-accounts/dropbox/callback',
+      enabled: process.env.PROVIDER_DROPBOX_ENABLED !== 'false',
+    },
   },
   transfer: {
     queueName: process.env.TRANSFER_QUEUE_NAME ?? 'cloudfusion-transfers',
