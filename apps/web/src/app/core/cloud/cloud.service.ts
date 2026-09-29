@@ -4,7 +4,7 @@ import { Observable, map } from 'rxjs';
 import { AuthService } from '../auth/auth.service';
 import { environment } from '../../../environments/environment';
 import { ApiResponse } from '../../shared/models/api-response.model';
-import { BackupJobRecord, BackupPolicyRecord, CloudAccount, CloudAccountImpactRecord, CloudFile, CloudProvider, CloudSearchResponse, CloudStorageSummary, DataProtectionEventRecord, FileVersionRecord, ProtectionAlertRecord, ProtectionOverviewRecord, ResourceShareRecord, ResourceShareRole, SharePage, ShareUserSearchResult, SnapshotEntryRecord, SnapshotRecord, SnapshotRestoreJobRecord, StorageRule, TransferJob, TransferProgressEvent, TransferOperation, VirtualNode } from '../../shared/models/cloud.model';
+import { BackupJobRecord, BackupPolicyRecord, CloudAccount, CloudAccountImpactRecord, CloudFile, CloudProvider, CloudSearchResponse, CloudStorageSummary, CreateShareInvitationResult, DataProtectionEventRecord, FileVersionRecord, ProtectionAlertRecord, ProtectionOverviewRecord, ResourceShareRecord, ResourceShareRole, ShareInvitationPage, SharePage, ShareUserSearchResult, SnapshotEntryRecord, SnapshotRecord, SnapshotRestoreJobRecord, StorageRule, TransferJob, TransferProgressEvent, TransferOperation, VirtualNode } from '../../shared/models/cloud.model';
 
 @Injectable({ providedIn: 'root' })
 export class CloudService {
@@ -182,6 +182,23 @@ export class CloudService {
 
   revokeResourceShare(id: string): Observable<{ revoked: true }> {
     return this.http.delete<ApiResponse<{ revoked: true }>>(`${this.apiUrl}/shares/${id}`).pipe(map((response) => response.data));
+  }
+
+  createShareInvitation(nodeId: string, email: string, role: ResourceShareRole): Observable<CreateShareInvitationResult> {
+    return this.http.post<ApiResponse<CreateShareInvitationResult>>(`${this.apiUrl}/shares/invitations`, { nodeId, email, role }).pipe(map((response) => response.data));
+  }
+
+  listShareInvitations(page = 1, limit = 25): Observable<ShareInvitationPage> {
+    const params = new HttpParams().set('page', page).set('limit', limit);
+    return this.http.get<ApiResponse<ShareInvitationPage>>(`${this.apiUrl}/shares/invitations`, { params }).pipe(map((response) => response.data));
+  }
+
+  revokeShareInvitation(id: string): Observable<{ revoked: true }> {
+    return this.http.delete<ApiResponse<{ revoked: true }>>(`${this.apiUrl}/shares/invitations/${id}`).pipe(map((response) => response.data));
+  }
+
+  acceptShareInvitation(token: string): Observable<ResourceShareRecord> {
+    return this.http.post<ApiResponse<ResourceShareRecord>>(`${this.apiUrl}/shares/invitations/accept`, { token }).pipe(map((response) => response.data));
   }
 
   createVirtualFolder(name: string, parentId?: string): Observable<VirtualNode> {

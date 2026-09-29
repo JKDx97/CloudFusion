@@ -3,7 +3,7 @@ import { Component, DestroyRef, OnInit, inject, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { Router, RouterLink } from '@angular/router';
 import { CloudService } from '../../core/cloud/cloud.service';
-import { FileVersionRecord, ResourceShareRecord, ResourceShareRole, ShareUser, VirtualNode } from '../../shared/models/cloud.model';
+import { CreateShareInvitationResult, FileVersionRecord, ResourceShareRecord, ResourceShareRole, ShareInvitationRecord, ShareUser, VirtualNode } from '../../shared/models/cloud.model';
 
 type DriveSection = 'drive' | 'recent' | 'favorites' | 'shared' | 'trash';
 
@@ -34,12 +34,18 @@ export class DriveComponent implements OnInit {
   readonly activeShareRole = signal<ResourceShareRole | null>(null);
   readonly shareTarget = signal<VirtualNode | null>(null);
   readonly shareEntries = signal<ResourceShareRecord[]>([]);
+  readonly shareInvitations = signal<ShareInvitationRecord[]>([]);
   readonly shareEmail = signal('');
   readonly shareRole = signal<ResourceShareRole>('VIEWER');
   readonly shareQuery = signal('');
   readonly shareUsers = signal<ShareUser[]>([]);
   readonly shareBusy = signal(false);
   readonly shareError = signal<string | null>(null);
+  readonly invitationToken = signal<string | null>(null);
+  readonly invitationExpiresAt = signal<string | null>(null);
+  readonly invitationAcceptToken = signal('');
+  readonly invitationAcceptError = signal<string | null>(null);
+  readonly invitationAcceptBusy = signal(false);
 
   ngOnInit(): void { this.openDrive(); }
 
@@ -204,19 +210,26 @@ export class DriveComponent implements OnInit {
     this.shareRole.set('VIEWER');
     this.shareQuery.set('');
     this.shareUsers.set([]);
+    this.shareInvitations.set([]);
+    this.invitationToken.set(null);
+    this.invitationExpiresAt.set(null);
     this.shareError.set(null);
     this.shareBusy.set(true);
     this.cloud.getSharesCreated(1, 100, node.id).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
       next: (page) => { this.shareEntries.set(page.items); this.shareBusy.set(false); },
       error: () => { this.shareEntries.set([]); this.shareBusy.set(false); this.shareError.set('No se pudo cargar la lista de personas.'); },
     });
+    this.loadShareInvitations(node.id);
   }
 
   closeShareDialog(): void {
     this.shareTarget.set(null);
     this.shareEntries.set([]);
+    this.shareInvitations.set([]);
     this.shareUsers.set([]);
     this.shareError.set(null);
+    this.invitationToken.set(null);
+    this.invitationExpiresAt.set(null);
   }
 
   searchShareUsers(): void {
@@ -252,6 +265,50 @@ export class DriveComponent implements OnInit {
     });
   }
 
+  createShareInvitation(): void {
+    const target = this.shareTarget();
+    const email = this.shareEmail().trim();
+    if (!target || !email) { this.shareError.set('Escribe el correo de la persona que quieres invitar.'); return; }
+    this.shareBusy.set(true);
+    this.shareError.set(null);
+    this.cloud.createShareInvitation(target.id, email, this.shareRole()).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: (invitation: CreateShareInvitationResult) => {
+        this.invitationToken.set(invitation.token);
+        this.invitationExpiresAt.set(invitation.expiresAt);
+        this.shareBusy.set(false);
+        this.loadShareInvitations(target.id);
+      },
+      error: () => { this.shareBusy.set(false); this.shareError.set('No se pudo crear la invitación. Si la persona ya tiene cuenta, compártelo directamente.'); },
+    });
+  }
+
+  revokeInvitation(invitation: ShareInvitationRecord): void {
+    if (!window.confirm(`¿Cancelar la invitación enviada a ${invitation.email}?`)) return;
+    this.cloud.revokeShareInvitation(invitation.id).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: () => { const target = this.shareTarget(); if (target) this.loadShareInvitations(target.id); },
+      error: () => this.shareError.set('No se pudo cancelar la invitación.'),
+    });
+  }
+
+  acceptInvitation(): void {
+    const token = this.invitationAcceptToken().trim();
+    if (!token) { this.invitationAcceptError.set('Pega el código de invitación.'); return; }
+    this.invitationAcceptBusy.set(true);
+    this.invitationAcceptError.set(null);
+    this.cloud.acceptShareInvitation(token).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: (share) => {
+        this.invitationAcceptBusy.set(false);
+        this.invitationAcceptToken.set('');
+        this.announce(`Aceptaste la invitación para “${share.node.name}”.`);
+        this.openSection('shared');
+      },
+      error: () => {
+        this.invitationAcceptBusy.set(false);
+        this.invitationAcceptError.set('No se pudo aceptar. Comprueba que el código esté vigente y que tu cuenta use el correo invitado.');
+      },
+    });
+  }
+
   changeShareRole(entry: ResourceShareRecord, event: Event): void {
     const role = (event.target as HTMLSelectElement).value as ResourceShareRole;
     this.cloud.updateResourceShare(entry.id, role).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
@@ -281,6 +338,13 @@ export class DriveComponent implements OnInit {
     this.cloud.getSharesCreated(1, 100, nodeId).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
       next: (page) => { this.shareEntries.set(page.items); this.shareBusy.set(false); },
       error: () => { this.shareBusy.set(false); this.shareError.set('No se pudo actualizar la lista de personas.'); },
+    });
+  }
+
+  private loadShareInvitations(nodeId: string): void {
+    this.cloud.listShareInvitations(1, 100).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: (page) => this.shareInvitations.set(page.items.filter((invitation) => invitation.node?.id === nodeId && !invitation.acceptedAt && !invitation.revokedAt && new Date(invitation.expiresAt).getTime() > Date.now())),
+      error: () => this.shareInvitations.set([]),
     });
   }
 

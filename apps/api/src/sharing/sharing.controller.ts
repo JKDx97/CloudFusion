@@ -8,6 +8,8 @@ import { ShareListQueryDto } from './dto/share-list-query.dto';
 import { SearchUsersQueryDto } from './dto/search-users-query.dto';
 import { UpdateShareDto } from './dto/update-share.dto';
 import { SharingService } from './sharing.service';
+import { CreateShareInvitationDto } from './dto/create-share-invitation.dto';
+import { AcceptShareInvitationDto } from './dto/accept-share-invitation.dto';
 
 @ApiTags('Sharing')
 @ApiBearerAuth()
@@ -40,6 +42,32 @@ export class SharingController {
   @ApiOperation({ summary: 'Search a limited set of active users without exposing the full user directory' })
   searchUsers(@Req() request: AuthenticatedRequest, @Query() query: SearchUsersQueryDto) {
     return this.sharing.searchUsers(request.user.sub, query);
+  }
+
+  @Post('invitations')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @ApiOperation({ summary: 'Create an expiring invitation for an email that has not registered yet; token is returned once' })
+  createInvitation(@Req() request: AuthenticatedRequest, @Body() dto: CreateShareInvitationDto) {
+    return this.sharing.createInvitation(request.user.sub, dto);
+  }
+
+  @Get('invitations')
+  @ApiOperation({ summary: 'List invitations created by the authenticated user without exposing token hashes' })
+  listInvitations(@Req() request: AuthenticatedRequest, @Query() query: ShareListQueryDto) {
+    return this.sharing.listInvitations(request.user.sub, query);
+  }
+
+  @Delete('invitations/:id')
+  @ApiOperation({ summary: 'Revoke a pending invitation created by the authenticated user' })
+  revokeInvitation(@Req() request: AuthenticatedRequest, @Param('id') id: string) {
+    return this.sharing.revokeInvitation(request.user.sub, id);
+  }
+
+  @Post('invitations/accept')
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @ApiOperation({ summary: 'Accept an invitation only when its intended email matches the authenticated account' })
+  acceptInvitation(@Req() request: AuthenticatedRequest, @Body() dto: AcceptShareInvitationDto) {
+    return this.sharing.acceptInvitation(request.user.sub, dto.token);
   }
 
   @Patch(':id')

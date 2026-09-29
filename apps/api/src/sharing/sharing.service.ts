@@ -1,6 +1,9 @@
-import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, ConflictException, ForbiddenException, GoneException, Injectable, NotFoundException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { IsNull, Repository } from 'typeorm';
+import { InjectDataSource } from '@nestjs/typeorm';
+import { createHash, randomBytes } from 'node:crypto';
+import { DataSource, IsNull, Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
 import { User, UserStatus } from '../users/entities/user.entity';
 import { VirtualNode } from '../virtual-fs/entities/virtual-node.entity';
@@ -14,6 +17,8 @@ import { CreateShareDto } from './dto/create-share.dto';
 import { ShareListQueryDto } from './dto/share-list-query.dto';
 import { SearchUsersQueryDto } from './dto/search-users-query.dto';
 import { UpdateShareDto } from './dto/update-share.dto';
+import { ShareInvitation } from './entities/share-invitation.entity';
+import { CreateShareInvitationDto } from './dto/create-share-invitation.dto';
 
 @Injectable()
 export class SharingService {
@@ -21,8 +26,11 @@ export class SharingService {
     @InjectRepository(ResourceShare) private readonly shares: Repository<ResourceShare>,
     @InjectRepository(VirtualNode) private readonly nodes: Repository<VirtualNode>,
     @InjectRepository(User) private readonly users: Repository<User>,
+    @InjectRepository(ShareInvitation) private readonly invitations: Repository<ShareInvitation>,
     private readonly permissions: PermissionsService,
     private readonly audit: AuditService,
+    @InjectDataSource() private readonly dataSource: DataSource,
+    private readonly config: ConfigService,
   ) {}
 
   async create(ownerUserId: string, dto: CreateShareDto) {
@@ -104,6 +112,7 @@ export class SharingService {
 
   async searchUsers(userId: string, query: SearchUsersQueryDto) {
     const term = query.q.trim().toLowerCase();
+    if (term.length < 2) throw new BadRequestException('Search must contain at least two characters');
     const builder = this.users.createQueryBuilder('user')
       .select(['user.id', 'user.username', 'user.email'])
       .where('user.status = :status', { status: UserStatus.ACTIVE })
@@ -127,6 +136,125 @@ export class SharingService {
       limit: query.limit,
       total,
     };
+  }
+
+  async createInvitation(ownerUserId: string, dto: CreateShareInvitationDto) {
+    await this.permissions.requireOwner(ownerUserId, dto.nodeId);
+    const node = await this.nodes.findOne({ where: { id: dto.nodeId, userId: ownerUserId, deletedAt: IsNull() } });
+    if (!node) throw new NotFoundException('Virtual node not found');
+    const email = dto.email.trim().toLowerCase();
+    const existingUser = await this.users.findOne({ where: { email, status: UserStatus.ACTIVE } });
+    if (existingUser) throw new ConflictException('This person already has a CloudFusion account; create a direct share instead');
+
+    const configuredDays = Number(this.config.get<string | number>('SHARE_INVITATION_EXPIRY_DAYS') ?? 7);
+    const expiryDays = Number.isFinite(configuredDays) && configuredDays > 0 ? Math.min(30, configuredDays) : 7;
+    const token = randomBytes(32).toString('base64url');
+    const expiresAt = new Date(Date.now() + expiryDays * 24 * 60 * 60 * 1000);
+    const invitation = await this.invitations.save(this.invitations.create({
+      email,
+      nodeId: node.id,
+      ownerUserId,
+      role: dto.role,
+      tokenHash: this.hashInvitationToken(token),
+      expiresAt,
+      acceptedAt: null,
+      revokedAt: null,
+    }));
+    await this.audit.record(ownerUserId, 'RESOURCE_SHARE_INVITATION_CREATED', 'VirtualNode', node.id, {
+      invitationId: invitation.id,
+      role: invitation.role,
+      expiresAt: invitation.expiresAt.toISOString(),
+    });
+    // The token is returned once because no email transport is configured yet; only its hash is persisted.
+    return { id: invitation.id, email: invitation.email, role: invitation.role, token, expiresAt: invitation.expiresAt };
+  }
+
+  async listInvitations(ownerUserId: string, query: ShareListQueryDto) {
+    const [invitations, total] = await this.invitations.findAndCount({
+      where: { ownerUserId },
+      order: { createdAt: 'DESC' },
+      skip: (query.page - 1) * query.limit,
+      take: query.limit,
+    });
+    const nodes = invitations.length
+      ? await this.nodes.find({ where: [...new Set(invitations.map((invitation) => invitation.nodeId))].map((id) => ({ id })) })
+      : [];
+    const nodeById = new Map(nodes.map((node) => [node.id, node]));
+    return {
+      items: invitations.map((invitation) => ({
+        id: invitation.id,
+        email: invitation.email,
+        node: nodeById.has(invitation.nodeId) ? { id: invitation.nodeId, name: nodeById.get(invitation.nodeId)!.name } : null,
+        role: invitation.role,
+        expiresAt: invitation.expiresAt,
+        acceptedAt: invitation.acceptedAt,
+        revokedAt: invitation.revokedAt,
+        createdAt: invitation.createdAt,
+      })),
+      page: query.page,
+      limit: query.limit,
+      total,
+    };
+  }
+
+  async revokeInvitation(ownerUserId: string, invitationId: string) {
+    const invitation = await this.invitations.findOne({ where: { id: invitationId, ownerUserId } });
+    if (!invitation) throw new NotFoundException('Invitation not found');
+    if (invitation.acceptedAt || invitation.revokedAt || invitation.expiresAt <= new Date()) throw new GoneException('Invitation is no longer pending');
+    invitation.revokedAt = new Date();
+    await this.invitations.save(invitation);
+    await this.audit.record(ownerUserId, 'RESOURCE_SHARE_INVITATION_REVOKED', 'VirtualNode', invitation.nodeId, { invitationId });
+    return { revoked: true };
+  }
+
+  async acceptInvitation(userId: string, token: string) {
+    if (token.length < 32 || token.length > 128) throw new NotFoundException('Invitation not found');
+    const tokenHash = this.hashInvitationToken(token);
+    const accepted = await this.dataSource.transaction(async (manager) => {
+      const invitationRepository = manager.getRepository(ShareInvitation);
+      const invitation = await invitationRepository.createQueryBuilder('invitation')
+        .setLock('pessimistic_write')
+        .where('invitation.tokenHash = :tokenHash', { tokenHash })
+        .getOne();
+      if (!invitation) throw new NotFoundException('Invitation not found');
+      if (invitation.acceptedAt || invitation.revokedAt) throw new GoneException('Invitation is no longer pending');
+      if (invitation.expiresAt <= new Date()) throw new GoneException('Invitation has expired');
+
+      const user = await manager.getRepository(User).findOne({ where: { id: userId, status: UserStatus.ACTIVE } });
+      if (!user || user.email.toLowerCase() !== invitation.email.toLowerCase()) {
+        throw new ForbiddenException('This invitation belongs to a different email address');
+      }
+      const node = await manager.getRepository(VirtualNode).findOne({ where: { id: invitation.nodeId, userId: invitation.ownerUserId, deletedAt: IsNull() } });
+      if (!node) throw new GoneException('Shared resource is no longer available');
+
+      const shareRepository = manager.getRepository(ResourceShare);
+      let share = await shareRepository.findOne({ where: { nodeId: node.id, sharedWithUserId: user.id } });
+      if (share) {
+        share.ownerUserId = invitation.ownerUserId;
+        share.role = invitation.role;
+        share.status = ResourceShareStatus.ACTIVE;
+        share.revokedAt = null;
+      } else {
+        share = shareRepository.create({
+          ownerUserId: invitation.ownerUserId,
+          nodeId: node.id,
+          sharedWithUserId: user.id,
+          role: invitation.role,
+          status: ResourceShareStatus.ACTIVE,
+          revokedAt: null,
+        });
+      }
+      share = await shareRepository.save(share);
+      invitation.acceptedAt = new Date();
+      await invitationRepository.save(invitation);
+      return { share, node };
+    });
+    await this.audit.record(userId, 'RESOURCE_SHARE_INVITATION_ACCEPTED', 'VirtualNode', accepted.node.id, { ownerUserId: accepted.share.ownerUserId, shareId: accepted.share.id });
+    return this.toShareResponse(accepted.share, accepted.node);
+  }
+
+  private hashInvitationToken(token: string): string {
+    return createHash('sha256').update(token).digest('hex');
   }
 
   private async getOwnedShare(ownerUserId: string, shareId: string): Promise<ResourceShare> {

@@ -95,6 +95,32 @@ export interface ShareUserSearchResult {
   total: number;
 }
 
+export interface ShareInvitationRecord {
+  id: string;
+  email: string;
+  node: { id: string; name: string } | null;
+  role: ResourceShareRole;
+  expiresAt: string;
+  acceptedAt: string | null;
+  revokedAt: string | null;
+  createdAt: string;
+}
+
+export interface ShareInvitationPage {
+  items: ShareInvitationRecord[];
+  page: number;
+  limit: number;
+  total: number;
+}
+
+export interface CreateShareInvitationResult {
+  id: string;
+  email: string;
+  role: ResourceShareRole;
+  token: string;
+  expiresAt: string;
+}
+
 export interface FileVersionRecord {
   id: string;
   versionNumber: number;
