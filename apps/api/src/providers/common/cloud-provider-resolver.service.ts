@@ -1,19 +1,13 @@
 import { Injectable } from '@nestjs/common';
 import { CloudProvider } from './cloud-provider.enum';
 import { CloudProviderAdapter } from './cloud-provider.interface';
-import { GoogleDriveAdapter } from '../google-drive/google-drive.adapter';
-import { OneDriveAdapter } from '../onedrive/onedrive.adapter';
+import { ProviderRegistryService } from './provider-registry.service';
 
 @Injectable()
 export class CloudProviderResolver {
-  constructor(
-    private readonly googleDrive: GoogleDriveAdapter,
-    private readonly oneDrive: OneDriveAdapter,
-  ) {}
+  constructor(private readonly registry: ProviderRegistryService) {}
 
   resolve(provider: CloudProvider): CloudProviderAdapter {
-    if (provider === CloudProvider.GOOGLE_DRIVE) return this.googleDrive;
-    if (provider === CloudProvider.ONEDRIVE) return this.oneDrive;
-    throw new Error(`Unsupported cloud provider: ${provider}`);
+    return this.registry.resolve(provider);
   }
 }
