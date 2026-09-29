@@ -30,6 +30,7 @@ import { ApiTokensModule } from './api-tokens/api-tokens.module';
 import { ApiToken } from './api-tokens/entities/api-token.entity';
 import { WebDavModule } from './webdav/webdav.module';
 import { WorkspacesModule } from './workspaces/workspaces.module';
+import { P2pModule } from './p2p/p2p.module';
 
 @Module({
   imports: [
@@ -39,6 +40,7 @@ import { WorkspacesModule } from './workspaces/workspaces.module';
       load: [configuration],
     }),
     RealtimeModule,
+    P2pModule,
     ApiTokensModule,
     WebDavModule,
     WorkspacesModule,

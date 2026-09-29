@@ -126,4 +126,9 @@ export default () => ({
     backupWorkerEnabled: process.env.BACKUP_WORKER_ENABLED !== 'false',
     backupScheduleIntervalSeconds: Number(process.env.BACKUP_SCHEDULE_INTERVAL_SECONDS ?? 30),
   },
+  p2p: {
+    transferTicketTtlSeconds: Number(process.env.P2P_TRANSFER_TICKET_TTL_SECONDS ?? 120),
+    availabilityTtlSeconds: Number(process.env.P2P_AVAILABILITY_TTL_SECONDS ?? 900),
+    maxConcurrentTransfers: Number(process.env.P2P_MAX_CONCURRENT_TRANSFERS ?? 4),
+  },
 });
