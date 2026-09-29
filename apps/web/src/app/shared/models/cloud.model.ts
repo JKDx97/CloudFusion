@@ -121,6 +121,44 @@ export interface CreateShareInvitationResult {
   expiresAt: string;
 }
 
+export type PublicSharePermission = 'VIEW_ONLY' | 'DOWNLOAD';
+export type PublicShareExpiry = '1_DAY' | '7_DAYS' | '30_DAYS' | 'NEVER';
+
+export interface PublicShareRecord {
+  id: string;
+  node: { id: string; name: string; type: VirtualNodeType; mimeType: string | null; size: number | null };
+  permission: PublicSharePermission;
+  expiresAt: string | null;
+  passwordProtected: boolean;
+  downloadLimit: number | null;
+  downloadCount: number;
+  enabled: boolean;
+  createdAt: string;
+  revokedAt: string | null;
+}
+
+export interface PublicSharePage {
+  items: PublicShareRecord[];
+  page: number;
+  limit: number;
+  total: number;
+}
+
+export interface CreatePublicShareResult extends PublicShareRecord {
+  token: string;
+  url: string;
+}
+
+export interface PublicShareInfo {
+  passwordRequired: boolean;
+  ownerName?: string;
+  permission?: PublicSharePermission;
+  expiresAt?: string | null;
+  downloadLimit?: number | null;
+  downloadCount?: number;
+  resource?: { name: string; type: VirtualNodeType; mimeType: string | null; size: number | null };
+}
+
 export interface FileVersionRecord {
   id: string;
   versionNumber: number;

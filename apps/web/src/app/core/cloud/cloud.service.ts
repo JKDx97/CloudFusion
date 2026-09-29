@@ -4,7 +4,7 @@ import { Observable, map } from 'rxjs';
 import { AuthService } from '../auth/auth.service';
 import { environment } from '../../../environments/environment';
 import { ApiResponse } from '../../shared/models/api-response.model';
-import { BackupJobRecord, BackupPolicyRecord, CloudAccount, CloudAccountImpactRecord, CloudFile, CloudProvider, CloudSearchResponse, CloudStorageSummary, CreateShareInvitationResult, DataProtectionEventRecord, FileVersionRecord, ProtectionAlertRecord, ProtectionOverviewRecord, ResourceShareRecord, ResourceShareRole, ShareInvitationPage, SharePage, ShareUserSearchResult, SnapshotEntryRecord, SnapshotRecord, SnapshotRestoreJobRecord, StorageRule, TransferJob, TransferProgressEvent, TransferOperation, VirtualNode } from '../../shared/models/cloud.model';
+import { BackupJobRecord, BackupPolicyRecord, CloudAccount, CloudAccountImpactRecord, CloudFile, CloudProvider, CloudSearchResponse, CloudStorageSummary, CreatePublicShareResult, CreateShareInvitationResult, DataProtectionEventRecord, FileVersionRecord, ProtectionAlertRecord, ProtectionOverviewRecord, PublicShareExpiry, PublicShareInfo, PublicSharePage, PublicSharePermission, PublicShareRecord, ResourceShareRecord, ResourceShareRole, ShareInvitationPage, SharePage, ShareUserSearchResult, SnapshotEntryRecord, SnapshotRecord, SnapshotRestoreJobRecord, StorageRule, TransferJob, TransferProgressEvent, TransferOperation, VirtualNode } from '../../shared/models/cloud.model';
 
 @Injectable({ providedIn: 'root' })
 export class CloudService {
@@ -199,6 +199,32 @@ export class CloudService {
 
   acceptShareInvitation(token: string): Observable<ResourceShareRecord> {
     return this.http.post<ApiResponse<ResourceShareRecord>>(`${this.apiUrl}/shares/invitations/accept`, { token }).pipe(map((response) => response.data));
+  }
+
+  createPublicShare(nodeId: string, permission: PublicSharePermission, expiry: PublicShareExpiry, password?: string, downloadLimit?: number): Observable<CreatePublicShareResult> {
+    return this.http.post<ApiResponse<CreatePublicShareResult>>(`${this.apiUrl}/public-shares`, { nodeId, permission, expiry, password, downloadLimit }).pipe(map((response) => response.data));
+  }
+
+  listPublicShares(page = 1, limit = 100, nodeId?: string): Observable<PublicSharePage> {
+    let params = new HttpParams().set('page', page).set('limit', limit);
+    if (nodeId) params = params.set('nodeId', nodeId);
+    return this.http.get<ApiResponse<PublicSharePage>>(`${this.apiUrl}/public-shares`, { params }).pipe(map((response) => response.data));
+  }
+
+  revokePublicShare(id: string): Observable<{ revoked: true }> {
+    return this.http.delete<ApiResponse<{ revoked: true }>>(`${this.apiUrl}/public-shares/${id}`).pipe(map((response) => response.data));
+  }
+
+  getPublicShare(token: string): Observable<PublicShareInfo> {
+    return this.http.get<ApiResponse<PublicShareInfo>>(`${this.apiUrl}/s/${token}`).pipe(map((response) => response.data));
+  }
+
+  accessPublicShare(token: string, password: string): Observable<PublicShareInfo> {
+    return this.http.post<ApiResponse<PublicShareInfo>>(`${this.apiUrl}/s/${token}/access`, { password }).pipe(map((response) => response.data));
+  }
+
+  downloadPublicShare(token: string, password?: string): Observable<Blob> {
+    return this.http.post(`${this.apiUrl}/s/${token}/download`, { password }, { responseType: 'blob' });
   }
 
   createVirtualFolder(name: string, parentId?: string): Observable<VirtualNode> {

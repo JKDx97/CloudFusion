@@ -21,10 +21,14 @@ import { StorageGarbageCollectorService } from './storage-garbage-collector.serv
 import { BackupCopy } from '../backups/entities/backup-copy.entity';
 import { PermissionsModule } from '../permissions/permissions.module';
 import { SharingModule } from '../sharing/sharing.module';
+import { PublicShare } from '../sharing/entities/public-share.entity';
+import { PublicSharesController } from '../sharing/public-shares.controller';
+import { PublicSharesService } from '../sharing/public-shares.service';
+import { User } from '../users/entities/user.entity';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([VirtualNode, StorageObject, StorageReplica, StoragePolicy, FileVersion, SnapshotEntry, BackupCopy]), ConfigModule, CloudAccountsModule, AuditModule, PermissionsModule, SharingModule],
-  controllers: [VirtualDriveController],
+  imports: [TypeOrmModule.forFeature([VirtualNode, StorageObject, StorageReplica, StoragePolicy, FileVersion, SnapshotEntry, BackupCopy, PublicShare, User]), ConfigModule, CloudAccountsModule, AuditModule, PermissionsModule, SharingModule],
+  controllers: [VirtualDriveController, PublicSharesController],
   providers: [
     {
       provide: REPLICATION_QUEUE,
@@ -33,6 +37,7 @@ import { SharingModule } from '../sharing/sharing.module';
     },
     ReplicationQueueService,
     VirtualDriveService,
+    PublicSharesService,
     ReplicationWorkerService,
     ReplicaHealthService,
     StorageGarbageCollectorService,

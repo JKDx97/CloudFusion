@@ -3,7 +3,7 @@ import { Component, DestroyRef, OnInit, inject, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { Router, RouterLink } from '@angular/router';
 import { CloudService } from '../../core/cloud/cloud.service';
-import { CreateShareInvitationResult, FileVersionRecord, ResourceShareRecord, ResourceShareRole, ShareInvitationRecord, ShareUser, VirtualNode } from '../../shared/models/cloud.model';
+import { CreatePublicShareResult, CreateShareInvitationResult, FileVersionRecord, PublicShareExpiry, PublicSharePermission, PublicShareRecord, ResourceShareRecord, ResourceShareRole, ShareInvitationRecord, ShareUser, VirtualNode } from '../../shared/models/cloud.model';
 
 type DriveSection = 'drive' | 'recent' | 'favorites' | 'shared' | 'trash';
 
@@ -46,6 +46,12 @@ export class DriveComponent implements OnInit {
   readonly invitationAcceptToken = signal('');
   readonly invitationAcceptError = signal<string | null>(null);
   readonly invitationAcceptBusy = signal(false);
+  readonly publicShares = signal<PublicShareRecord[]>([]);
+  readonly publicPermission = signal<PublicSharePermission>('DOWNLOAD');
+  readonly publicExpiry = signal<PublicShareExpiry>('7_DAYS');
+  readonly publicPassword = signal('');
+  readonly publicDownloadLimit = signal('');
+  readonly publicLink = signal<CreatePublicShareResult | null>(null);
 
   ngOnInit(): void { this.openDrive(); }
 
@@ -213,6 +219,10 @@ export class DriveComponent implements OnInit {
     this.shareInvitations.set([]);
     this.invitationToken.set(null);
     this.invitationExpiresAt.set(null);
+    this.publicPassword.set('');
+    this.publicDownloadLimit.set('');
+    this.publicLink.set(null);
+    this.publicShares.set([]);
     this.shareError.set(null);
     this.shareBusy.set(true);
     this.cloud.getSharesCreated(1, 100, node.id).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
@@ -220,6 +230,7 @@ export class DriveComponent implements OnInit {
       error: () => { this.shareEntries.set([]); this.shareBusy.set(false); this.shareError.set('No se pudo cargar la lista de personas.'); },
     });
     this.loadShareInvitations(node.id);
+    if (node.type === 'FILE') this.loadPublicShares(node.id);
   }
 
   closeShareDialog(): void {
@@ -230,6 +241,7 @@ export class DriveComponent implements OnInit {
     this.shareError.set(null);
     this.invitationToken.set(null);
     this.invitationExpiresAt.set(null);
+    this.publicLink.set(null);
   }
 
   searchShareUsers(): void {
@@ -290,6 +302,61 @@ export class DriveComponent implements OnInit {
     });
   }
 
+  createPublicShare(): void {
+    const target = this.shareTarget();
+    if (!target || target.type !== 'FILE') return;
+    const rawLimit = this.publicDownloadLimit().trim();
+    const downloadLimit = rawLimit ? Number(rawLimit) : undefined;
+    if (rawLimit && (!Number.isSafeInteger(downloadLimit) || (downloadLimit ?? 0) < 1)) {
+      this.shareError.set('El límite de descargas debe ser un número entero mayor que cero.');
+      return;
+    }
+    const password = this.publicPassword();
+    if (password && password.length < 8) {
+      this.shareError.set('La contraseña debe tener al menos 8 caracteres.');
+      return;
+    }
+    this.shareBusy.set(true);
+    this.shareError.set(null);
+    this.cloud.createPublicShare(target.id, this.publicPermission(), this.publicExpiry(), password || undefined, downloadLimit)
+      .pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+        next: (link) => {
+          this.publicLink.set(link);
+          this.publicPassword.set('');
+          this.shareBusy.set(false);
+          this.loadPublicShares(target.id);
+        },
+        error: () => {
+          this.shareBusy.set(false);
+          this.shareError.set('No se pudo crear el enlace. Comprueba que el archivo siga disponible y que la configuración sea válida.');
+        },
+      });
+  }
+
+  revokePublicShare(share: PublicShareRecord): void {
+    if (!window.confirm(`¿Desactivar el enlace público de “${share.node.name}”?`)) return;
+    this.cloud.revokePublicShare(share.id).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: () => { const target = this.shareTarget(); if (target) this.loadPublicShares(target.id); },
+      error: () => this.shareError.set('No se pudo desactivar el enlace público.'),
+    });
+  }
+
+  async copyPublicLink(): Promise<void> {
+    const url = this.publicLink()?.url;
+    if (!url) return;
+    try {
+      await navigator.clipboard.writeText(url);
+      this.announce('Enlace copiado al portapapeles.');
+    } catch {
+      this.shareError.set('No se pudo copiar automáticamente. Selecciona y copia el enlace.');
+    }
+  }
+
+  setPublicExpiry(value: string): void {
+    const allowed: PublicShareExpiry[] = ['1_DAY', '7_DAYS', '30_DAYS', 'NEVER'];
+    if (allowed.includes(value as PublicShareExpiry)) this.publicExpiry.set(value as PublicShareExpiry);
+  }
+
   acceptInvitation(): void {
     const token = this.invitationAcceptToken().trim();
     if (!token) { this.invitationAcceptError.set('Pega el código de invitación.'); return; }
@@ -345,6 +412,13 @@ export class DriveComponent implements OnInit {
     this.cloud.listShareInvitations(1, 100).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
       next: (page) => this.shareInvitations.set(page.items.filter((invitation) => invitation.node?.id === nodeId && !invitation.acceptedAt && !invitation.revokedAt && new Date(invitation.expiresAt).getTime() > Date.now())),
       error: () => this.shareInvitations.set([]),
+    });
+  }
+
+  private loadPublicShares(nodeId: string): void {
+    this.cloud.listPublicShares(1, 100, nodeId).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: (page) => this.publicShares.set(page.items),
+      error: () => this.shareError.set('No se pudieron cargar los enlaces públicos.'),
     });
   }
 
