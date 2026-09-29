@@ -24,11 +24,12 @@ import { BackupPolicy } from '../backups/entities/backup-policy.entity';
 import { BackupCopy } from '../backups/entities/backup-copy.entity';
 import { DropboxOAuthController } from './dropbox-oauth.controller';
 import { BoxOAuthController } from './box-oauth.controller';
+import { S3CloudProviderAdapterFactory } from '../providers/s3/s3-cloud-provider-adapter.factory';
 
 @Module({
   imports: [TypeOrmModule.forFeature([CloudAccount, StorageTarget, StorageReplica, FileVersion, SnapshotEntry, BackupPolicy, BackupCopy]), GoogleDriveModule, OneDriveModule, DropboxModule, BoxModule],
   controllers: [CloudAccountsController, ProvidersController, S3CloudAccountsController, DropboxOAuthController, BoxOAuthController],
-  providers: [CloudAccountService, S3CloudAccountService, S3CompatibleProviderFactory, AccountImpactService, TokenEncryptionService, OAuthStateService, ProviderRegistryService, CloudProviderResolver],
+  providers: [CloudAccountService, S3CloudAccountService, S3CompatibleProviderFactory, S3CloudProviderAdapterFactory, AccountImpactService, TokenEncryptionService, OAuthStateService, ProviderRegistryService, CloudProviderResolver],
   exports: [CloudAccountService, TokenEncryptionService, CloudProviderResolver, ProviderRegistryService],
 })
 export class CloudAccountsModule {}

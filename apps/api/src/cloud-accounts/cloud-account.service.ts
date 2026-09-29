@@ -17,6 +17,7 @@ import { ProviderException, ProviderErrorCode, providerHttpError } from '../prov
 import { OAuthStateService } from './services/oauth-state.service';
 import { TokenEncryptionService } from './services/token-encryption.service';
 import { AccountImpactService, CloudAccountImpact } from './account-impact.service';
+import { S3CloudProviderAdapterFactory } from '../providers/s3/s3-cloud-provider-adapter.factory';
 
 export interface CloudAccountPublic {
   id: string;
@@ -50,6 +51,7 @@ export class CloudAccountService {
     private readonly stateService: OAuthStateService,
     private readonly encryption: TokenEncryptionService,
     @Optional() private readonly impact?: AccountImpactService,
+    @Optional() private readonly s3ProviderFactory?: S3CloudProviderAdapterFactory,
   ) {}
 
   async list(userId: string): Promise<CloudAccountPublic[]> {
@@ -175,11 +177,16 @@ export class CloudAccountService {
 
   async getAuthorizedAccount(userId: string, accountId: string, forceRefresh = false): Promise<AuthorizedCloudAccount> {
     const account = await this.getOwnedAccount(userId, accountId);
-    if (account.credentialType !== CloudCredentialType.OAUTH2) {
-      throw new ProviderException(ProviderErrorCode.PROVIDER_CAPABILITY_NOT_SUPPORTED, 501);
-    }
     if (account.status !== CloudAccountStatus.CONNECTED) {
       throw new ProviderException(ProviderErrorCode.ACCOUNT_NOT_CONNECTED, 409);
+    }
+    if (account.credentialType === CloudCredentialType.ACCESS_KEY) {
+      if (!this.s3ProviderFactory) throw new ProviderException(ProviderErrorCode.PROVIDER_UNAVAILABLE, 503);
+      const adapter = await this.s3ProviderFactory.create(account);
+      return { account, adapter, accessToken: '' };
+    }
+    if (account.credentialType !== CloudCredentialType.OAUTH2) {
+      throw new ProviderException(ProviderErrorCode.PROVIDER_CAPABILITY_NOT_SUPPORTED, 501);
     }
     const adapter = this.resolver.resolve(account.provider);
     let accessToken: string;

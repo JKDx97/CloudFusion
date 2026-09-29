@@ -157,7 +157,7 @@ export class S3CompatibleProviderAdapter implements ObjectStorageAdapter {
     }
   }
 
-  async listObjects(options: { prefix?: string; continuationToken?: string; maxKeys?: number } = {}): Promise<ProviderObjectPage> {
+  async listObjects(options: { prefix?: string; delimiter?: string; continuationToken?: string; maxKeys?: number } = {}): Promise<ProviderObjectPage> {
     const maxKeys = options.maxKeys ?? 1000;
     if (!Number.isInteger(maxKeys) || maxKeys < 1 || maxKeys > 1000) throw new RangeError('maxKeys must be between 1 and 1000');
     const queryPrefix = options.prefix ? this.resolveKey(options.prefix) : this.managedPrefix;
@@ -165,6 +165,7 @@ export class S3CompatibleProviderAdapter implements ObjectStorageAdapter {
       const result = await this.client.send(new ListObjectsV2Command({
         Bucket: this.bucket,
         Prefix: queryPrefix,
+        Delimiter: options.delimiter,
         ContinuationToken: options.continuationToken,
         MaxKeys: maxKeys,
       }));
@@ -175,6 +176,9 @@ export class S3CompatibleProviderAdapter implements ObjectStorageAdapter {
           etag: item.ETag,
           lastModified: item.LastModified,
         }] : []),
+        commonPrefixes: (result.CommonPrefixes ?? []).flatMap((item) => item.Prefix?.startsWith(this.managedPrefix)
+          ? [item.Prefix.slice(this.managedPrefix.length)]
+          : []),
         continuationToken: result.NextContinuationToken,
         isTruncated: result.IsTruncated ?? false,
       };

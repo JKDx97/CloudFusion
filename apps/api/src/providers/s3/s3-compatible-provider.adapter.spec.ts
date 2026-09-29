@@ -51,9 +51,24 @@ describe('S3CompatibleProviderAdapter', () => {
     expect(command.input).toMatchObject({ Bucket: 'bucket-a', Prefix: 'cloudfusion/docs/', ContinuationToken: 'previous', MaxKeys: 20 });
     expect(result).toEqual({
       objects: [{ key: 'docs/report.pdf', size: 123, etag: undefined, lastModified: undefined }],
+      commonPrefixes: [],
       continuationToken: 'next-page',
       isTruncated: true,
     });
+  });
+
+  it('forwards delimiter listings and returns managed common prefixes relative to the target', async () => {
+    const send = jest.fn().mockResolvedValue({
+      Contents: [{ Key: 'cloudfusion/readme.txt', Size: 12 }],
+      CommonPrefixes: [{ Prefix: 'cloudfusion/docs/' }, { Prefix: 'other-prefix/' }],
+    });
+    const { adapter } = create(ProviderId.AWS_S3, send);
+
+    const result = await adapter.listObjects({ delimiter: '/', maxKeys: 1000 });
+
+    expect(send.mock.calls[0][0].input).toMatchObject({ Bucket: 'bucket-a', Prefix: 'cloudfusion/', Delimiter: '/', MaxKeys: 1000 });
+    expect(result.commonPrefixes).toEqual(['docs/']);
+    expect(result.objects.map(({ key }) => key)).toEqual(['readme.txt']);
   });
 
   it('rejects traversal keys and enforces conservative custom-S3 capabilities', async () => {

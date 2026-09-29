@@ -30,9 +30,9 @@ describe('ProviderRegistryService', () => {
     expect(box?.capabilities).toEqual(expect.objectContaining({ list: true, folders: true, search: true, rename: true, resumableUpload: true, quota: true }));
     expect(s3?.category).toBe(ProviderCategory.OBJECT_STORAGE);
     expect(s3?.supportStatus).toBe(ProviderSupportStatus.BETA);
-    expect(s3?.capabilities).toEqual(expect.objectContaining({ list: true, multipartUpload: true, rangeDownload: true }));
+    expect(s3?.capabilities).toEqual(expect.objectContaining({ list: true, folders: true, rename: true, multipartUpload: true, rangeDownload: true }));
     expect(r2?.supportStatus).toBe(ProviderSupportStatus.BETA);
-    expect(r2?.capabilities).toEqual(expect.objectContaining({ list: true, multipartUpload: true, rangeDownload: true }));
+    expect(r2?.capabilities).toEqual(expect.objectContaining({ list: true, folders: true, rename: true, multipartUpload: true, rangeDownload: true }));
     expect(new Set(catalog.map((entry) => entry.id)).size).toBe(catalog.length);
     expect(JSON.stringify(catalog).toLowerCase()).not.toContain('secret');
   });

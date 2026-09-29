@@ -37,6 +37,7 @@ export interface ProviderObjectMetadata {
 
 export interface ProviderObjectPage {
   objects: ProviderObjectMetadata[];
+  commonPrefixes?: string[];
   continuationToken?: string;
   isTruncated: boolean;
 }
@@ -59,7 +60,7 @@ export interface ObjectStorageAdapter {
   getObject(key: string, range?: { start: number; end?: number }): Promise<{ body: Readable; metadata: ProviderObjectMetadata }>;
   headObject(key: string): Promise<ProviderObjectMetadata>;
   deleteObject(key: string): Promise<void>;
-  listObjects(options?: { prefix?: string; continuationToken?: string; maxKeys?: number }): Promise<ProviderObjectPage>;
+  listObjects(options?: { prefix?: string; delimiter?: string; continuationToken?: string; maxKeys?: number }): Promise<ProviderObjectPage>;
   copyObject(sourceKey: string, destinationKey: string): Promise<ProviderObjectMetadata>;
   close(): void;
 }
