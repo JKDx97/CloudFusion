@@ -60,7 +60,11 @@ export class ProvidersComponent implements OnInit {
 
   ngOnInit(): void {
     const connectionId = this.route.snapshot.queryParamMap.get('connected');
-    if (connectionId) this.notice.set('La cuenta de Dropbox se conectó correctamente.');
+    if (connectionId) {
+      const provider = this.route.snapshot.queryParamMap.get('provider');
+      const providerName = ({ GOOGLE_DRIVE: 'Google Drive', ONEDRIVE: 'OneDrive', DROPBOX: 'Dropbox', BOX: 'Box' } as Record<string, string>)[provider ?? ''] ?? 'La nube';
+      this.notice.set(`${providerName} se conectó correctamente.`);
+    }
     const cloudError = this.route.snapshot.queryParamMap.get('cloudError');
     if (cloudError === 'provider_not_configured') this.error.set('Dropbox aún no está configurado en el servidor.');
     else if (cloudError === 'oauth_cancelled') this.error.set('Se canceló la autorización de Dropbox.');
@@ -96,7 +100,7 @@ export class ProvidersComponent implements OnInit {
 
   canConnectOAuth(provider: ProviderDescriptor): boolean {
     return provider.authenticationType === 'OAUTH2' && provider.supportStatus === 'BETA'
-      && ['GOOGLE_DRIVE', 'ONEDRIVE', 'DROPBOX'].includes(provider.id);
+      && ['GOOGLE_DRIVE', 'ONEDRIVE', 'DROPBOX', 'BOX'].includes(provider.id);
   }
 
   connectOAuth(provider: ProviderDescriptor): void {

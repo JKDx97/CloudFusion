@@ -7,9 +7,9 @@ import { CloudProvider } from '../providers/common/cloud-provider.enum';
 import { CloudAccountService } from './cloud-account.service';
 
 @ApiTags('Cloud Accounts')
-@Controller('cloud-accounts/dropbox')
-export class DropboxOAuthController {
-  private readonly logger = new Logger(DropboxOAuthController.name);
+@Controller('cloud-accounts/box')
+export class BoxOAuthController {
+  private readonly logger = new Logger(BoxOAuthController.name);
 
   constructor(private readonly accounts: CloudAccountService) {}
 
@@ -17,13 +17,13 @@ export class DropboxOAuthController {
   @UseGuards(AccessTokenGuard)
   @ApiBearerAuth()
   @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Start Dropbox OAuth authorization' })
+  @ApiOperation({ summary: 'Start Box OAuth authorization' })
   connect(@Req() request: AuthenticatedRequest) {
-    return { authorizationUrl: this.accounts.beginConnection(request.user.sub, CloudProvider.DROPBOX) };
+    return { authorizationUrl: this.accounts.beginConnection(request.user.sub, CloudProvider.BOX) };
   }
 
   @Get('callback')
-  @ApiOperation({ summary: 'Handle Dropbox OAuth callback' })
+  @ApiOperation({ summary: 'Handle Box OAuth callback' })
   async callback(
     @Query('code') code: string | undefined,
     @Query('state') state: string | undefined,
@@ -36,8 +36,8 @@ export class DropboxOAuthController {
       return;
     }
     try {
-      const result = await this.accounts.completeConnection(CloudProvider.DROPBOX, code, state);
-      response.redirect(`${frontend}/providers?connected=${encodeURIComponent(result.account.id)}&provider=DROPBOX`);
+      const result = await this.accounts.completeConnection(CloudProvider.BOX, code, state);
+      response.redirect(`${frontend}/providers?connected=${encodeURIComponent(result.account.id)}&provider=BOX`);
     } catch (cause: unknown) {
       const responseBody = cause && typeof cause === 'object' && 'getResponse' in cause
         ? (cause as { getResponse: () => unknown }).getResponse()
@@ -52,7 +52,7 @@ export class DropboxOAuthController {
         : message.includes('OAuth state is invalid or expired')
           ? 'oauth_state_invalid'
           : 'connection_failed';
-      this.logger.warn(JSON.stringify({ event: 'cloud_account.connection_failed', provider: CloudProvider.DROPBOX, cloudError }));
+      this.logger.warn(JSON.stringify({ event: 'cloud_account.connection_failed', provider: CloudProvider.BOX, cloudError }));
       response.redirect(`${frontend}/providers?cloudError=${cloudError}`);
     }
   }

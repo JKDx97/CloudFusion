@@ -7,16 +7,18 @@ describe('ProviderRegistryService', () => {
   const googleDrive = { provider: CloudProvider.GOOGLE_DRIVE } as CloudProviderAdapter;
   const oneDrive = { provider: CloudProvider.ONEDRIVE } as CloudProviderAdapter;
   const dropboxAdapter = { provider: CloudProvider.DROPBOX } as CloudProviderAdapter;
+  const boxAdapter = { provider: CloudProvider.BOX } as CloudProviderAdapter;
   let registry: ProviderRegistryService;
 
   beforeEach(() => {
-    registry = new ProviderRegistryService(googleDrive as never, oneDrive as never, dropboxAdapter as never);
+    registry = new ProviderRegistryService(googleDrive as never, oneDrive as never, dropboxAdapter as never, boxAdapter as never);
   });
 
   it('publishes a safe catalog with explicitly unverified and coming-soon entries', () => {
     const catalog = registry.getCatalog();
     const google = catalog.find((entry) => entry.id === ProviderId.GOOGLE_DRIVE);
     const dropbox = catalog.find((entry) => entry.id === ProviderId.DROPBOX);
+    const box = catalog.find((entry) => entry.id === ProviderId.BOX);
     const s3 = catalog.find((entry) => entry.id === ProviderId.AWS_S3);
     const r2 = catalog.find((entry) => entry.id === ProviderId.CLOUDFLARE_R2);
 
@@ -24,6 +26,8 @@ describe('ProviderRegistryService', () => {
     expect(google?.capabilities.search).toBe(true);
     expect(dropbox?.supportStatus).toBe(ProviderSupportStatus.BETA);
     expect(dropbox?.capabilities).toEqual(expect.objectContaining({ list: true, folders: true, search: true, rename: true, resumableUpload: true, quota: true }));
+    expect(box?.supportStatus).toBe(ProviderSupportStatus.BETA);
+    expect(box?.capabilities).toEqual(expect.objectContaining({ list: true, folders: true, search: true, rename: true, resumableUpload: true, quota: true }));
     expect(s3?.category).toBe(ProviderCategory.OBJECT_STORAGE);
     expect(s3?.supportStatus).toBe(ProviderSupportStatus.BETA);
     expect(s3?.capabilities).toEqual(expect.objectContaining({ list: true, multipartUpload: true, rangeDownload: true }));
@@ -44,5 +48,6 @@ describe('ProviderRegistryService', () => {
     expect(registry.resolve(CloudProvider.GOOGLE_DRIVE)).toBe(googleDrive);
     expect(registry.resolve(CloudProvider.ONEDRIVE)).toBe(oneDrive);
     expect(registry.resolve(CloudProvider.DROPBOX)).toBe(dropboxAdapter);
+    expect(registry.resolve(CloudProvider.BOX)).toBe(boxAdapter);
   });
 });

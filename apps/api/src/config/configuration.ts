@@ -70,6 +70,14 @@ export default () => ({
         'http://localhost:3000/cloud-accounts/dropbox/callback',
       enabled: process.env.PROVIDER_DROPBOX_ENABLED !== 'false',
     },
+    box: {
+      clientId: process.env.BOX_CLIENT_ID,
+      clientSecret: process.env.BOX_CLIENT_SECRET,
+      redirectUri:
+        process.env.BOX_REDIRECT_URI ??
+        'http://localhost:3000/cloud-accounts/box/callback',
+      enabled: process.env.PROVIDER_BOX_ENABLED !== 'false',
+    },
   },
   transfer: {
     queueName: process.env.TRANSFER_QUEUE_NAME ?? 'cloudfusion-transfers',
