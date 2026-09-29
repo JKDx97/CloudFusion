@@ -2,16 +2,18 @@ import { CloudProvider } from './cloud-provider.enum';
 import { CloudProviderAdapter } from './cloud-provider.interface';
 import { ProviderRegistryService } from './provider-registry.service';
 import { ProviderCategory, ProviderId, ProviderSupportStatus } from './provider-descriptor';
+import { PCloudAdapter } from '../pcloud/pcloud.adapter';
 
 describe('ProviderRegistryService', () => {
   const googleDrive = { provider: CloudProvider.GOOGLE_DRIVE } as CloudProviderAdapter;
   const oneDrive = { provider: CloudProvider.ONEDRIVE } as CloudProviderAdapter;
   const dropboxAdapter = { provider: CloudProvider.DROPBOX } as CloudProviderAdapter;
   const boxAdapter = { provider: CloudProvider.BOX } as CloudProviderAdapter;
+  const pcloudAdapter = { provider: CloudProvider.PCLOUD } as CloudProviderAdapter;
   let registry: ProviderRegistryService;
 
   beforeEach(() => {
-    registry = new ProviderRegistryService(googleDrive as never, oneDrive as never, dropboxAdapter as never, boxAdapter as never);
+    registry = new ProviderRegistryService(googleDrive as never, oneDrive as never, dropboxAdapter as never, boxAdapter as never, pcloudAdapter as PCloudAdapter);
   });
 
   it('publishes a safe catalog with explicitly unverified and coming-soon entries', () => {
@@ -21,6 +23,7 @@ describe('ProviderRegistryService', () => {
     const box = catalog.find((entry) => entry.id === ProviderId.BOX);
     const s3 = catalog.find((entry) => entry.id === ProviderId.AWS_S3);
     const r2 = catalog.find((entry) => entry.id === ProviderId.CLOUDFLARE_R2);
+    const pcloud = catalog.find((entry) => entry.id === ProviderId.PCLOUD);
 
     expect(google?.supportStatus).toBe(ProviderSupportStatus.BETA);
     expect(google?.capabilities.search).toBe(true);
@@ -33,6 +36,8 @@ describe('ProviderRegistryService', () => {
     expect(s3?.capabilities).toEqual(expect.objectContaining({ list: true, folders: true, rename: true, multipartUpload: true, rangeDownload: true }));
     expect(r2?.supportStatus).toBe(ProviderSupportStatus.BETA);
     expect(r2?.capabilities).toEqual(expect.objectContaining({ list: true, folders: true, rename: true, multipartUpload: true, rangeDownload: true }));
+    expect(pcloud?.supportStatus).toBe(ProviderSupportStatus.BETA);
+    expect(pcloud?.capabilities).toEqual(expect.objectContaining({ list: true, folders: true, rename: true, quota: true }));
     expect(new Set(catalog.map((entry) => entry.id)).size).toBe(catalog.length);
     expect(JSON.stringify(catalog).toLowerCase()).not.toContain('secret');
   });
@@ -49,5 +54,6 @@ describe('ProviderRegistryService', () => {
     expect(registry.resolve(CloudProvider.ONEDRIVE)).toBe(oneDrive);
     expect(registry.resolve(CloudProvider.DROPBOX)).toBe(dropboxAdapter);
     expect(registry.resolve(CloudProvider.BOX)).toBe(boxAdapter);
+    expect(registry.resolve(CloudProvider.PCLOUD)).toBe(pcloudAdapter);
   });
 });

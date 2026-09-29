@@ -78,6 +78,12 @@ export default () => ({
         'http://localhost:3000/cloud-accounts/box/callback',
       enabled: process.env.PROVIDER_BOX_ENABLED !== 'false',
     },
+    pcloud: {
+      clientId: process.env.PCLOUD_CLIENT_ID,
+      clientSecret: process.env.PCLOUD_CLIENT_SECRET,
+      redirectUri: process.env.PCLOUD_REDIRECT_URI ?? 'http://localhost:3000/cloud-accounts/pcloud/callback',
+      enabled: process.env.PROVIDER_PCLOUD_ENABLED !== 'false',
+    },
   },
   transfer: {
     queueName: process.env.TRANSFER_QUEUE_NAME ?? 'cloudfusion-transfers',

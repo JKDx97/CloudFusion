@@ -17,10 +17,17 @@ export interface ProviderUploadInput {
   parentId?: string;
 }
 
+export interface ProviderOAuthCallbackContext {
+  hostname?: string;
+  locationId?: string;
+}
+
 export interface CloudProviderAdapter {
   readonly provider: CloudProvider;
+  /** True only for providers whose documented access tokens have no expiry/refresh token. */
+  readonly accessTokenMayNotExpire?: boolean;
 
-  exchangeAuthorizationCode(code: string): Promise<{
+  exchangeAuthorizationCode(code: string, callbackContext?: ProviderOAuthCallbackContext): Promise<{
     account: CloudAccountInfo;
     tokens: ProviderTokenSet;
   }>;

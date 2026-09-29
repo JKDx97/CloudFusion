@@ -12,7 +12,7 @@ import { CloudAccount } from './entities/cloud-account.entity';
 import { CloudCredentialType } from './entities/cloud-credential-type.enum';
 import { CloudAccountStatus, CloudProvider } from '../providers/common/cloud-provider.enum';
 import { CloudProviderResolver } from '../providers/common/cloud-provider-resolver.service';
-import { CloudProviderAdapter, ProviderTokenSet } from '../providers/common/cloud-provider.interface';
+import { CloudProviderAdapter, ProviderOAuthCallbackContext, ProviderTokenSet } from '../providers/common/cloud-provider.interface';
 import { ProviderException, ProviderErrorCode, providerHttpError } from '../providers/common/provider-error';
 import { OAuthStateService } from './services/oauth-state.service';
 import { TokenEncryptionService } from './services/token-encryption.service';
@@ -103,20 +103,23 @@ export class CloudAccountService {
     provider: CloudProvider,
     code: string | undefined,
     state: string | undefined,
+    callbackContext?: ProviderOAuthCallbackContext,
   ): Promise<{ userId: string; account: CloudAccountPublic }> {
     if (!code || !state) throw new BadRequestException('OAuth callback is missing code or state');
     const userId = this.stateService.consume(state, provider);
     if (!userId) throw new BadRequestException('OAuth state is invalid or expired');
 
     const adapter = this.resolver.resolve(provider);
-    const result = await adapter.exchangeAuthorizationCode(code);
+    const result = await adapter.exchangeAuthorizationCode(code, callbackContext);
     const existing = await this.repository.findOne({
       where: { userId, provider, providerAccountId: result.account.providerAccountId },
     });
     const refreshTokenEncrypted = result.tokens.refreshToken
       ? this.encryption.encrypt(result.tokens.refreshToken)
       : existing?.refreshTokenEncrypted ?? null;
-    if (!refreshTokenEncrypted) throw new BadRequestException('Provider did not return a refresh token');
+    if (!refreshTokenEncrypted && (result.tokens.expiresAt || !adapter.accessTokenMayNotExpire)) {
+      throw new BadRequestException('Provider did not return a refresh token');
+    }
 
     const account = existing ?? this.repository.create({
       userId,
@@ -125,6 +128,9 @@ export class CloudAccountService {
     });
     account.email = result.account.email ?? null;
     account.displayName = result.account.displayName ?? null;
+    account.credentialType = CloudCredentialType.OAUTH2;
+    account.credentialsEncrypted = null;
+    account.configurationEncrypted = null;
     account.accessTokenEncrypted = this.encryption.encrypt(result.tokens.accessToken);
     account.refreshTokenEncrypted = refreshTokenEncrypted;
     account.tokenExpiresAt = result.tokens.expiresAt ?? null;
@@ -156,10 +162,16 @@ export class CloudAccountService {
     if (impact.requiresConfirmation && !confirmImpact) {
       throw new ConflictException({ code: 'ACCOUNT_IMPACT_CONFIRMATION_REQUIRED', impact });
     }
-    if (account.refreshTokenEncrypted) {
+    let revocationAdapter: CloudProviderAdapter | undefined;
+    let revocationTokenEncrypted = account.refreshTokenEncrypted;
+    if (!revocationTokenEncrypted && account.credentialType === CloudCredentialType.OAUTH2 && !account.tokenExpiresAt) {
+      revocationAdapter = this.resolver.resolve(account.provider);
+      if (revocationAdapter.accessTokenMayNotExpire) revocationTokenEncrypted = account.accessTokenEncrypted;
+    }
+    if (revocationTokenEncrypted) {
       try {
-        await this.resolver.resolve(account.provider).revokeAuthorization(
-          this.encryption.decrypt(account.refreshTokenEncrypted),
+        await (revocationAdapter ?? this.resolver.resolve(account.provider)).revokeAuthorization(
+          this.encryption.decrypt(revocationTokenEncrypted),
         );
       } catch {
         this.logger.warn(JSON.stringify({ event: 'cloud_account.revoke_failed', accountId }));
@@ -197,7 +209,10 @@ export class CloudAccountService {
     }
     const shouldRefresh = forceRefresh || !account.tokenExpiresAt || account.tokenExpiresAt.getTime() - Date.now() < 60_000;
     if (!shouldRefresh) return { account, adapter, accessToken };
-    if (!account.refreshTokenEncrypted) return this.markReauth(account);
+    if (!account.refreshTokenEncrypted) {
+      if (!account.tokenExpiresAt && adapter.accessTokenMayNotExpire) return { account, adapter, accessToken };
+      return this.markReauth(account);
+    }
     try {
       const refreshToken = this.encryption.decrypt(account.refreshTokenEncrypted);
       const tokens = await adapter.refreshAccessToken(refreshToken);
