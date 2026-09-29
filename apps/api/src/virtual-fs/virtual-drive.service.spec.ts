@@ -1,4 +1,4 @@
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import { ConflictException, ForbiddenException, NotFoundException } from '@nestjs/common';
 import { VirtualDriveService } from './virtual-drive.service';
 import { VirtualNode } from './entities/virtual-node.entity';
 import { StorageObject } from './entities/storage-object.entity';
@@ -30,7 +30,7 @@ function node(overrides: Partial<VirtualNode> = {}): VirtualNode {
   };
 }
 
-function fixture() {
+function fixture(permissions?: { requireRead: jest.Mock; requireWrite: jest.Mock }) {
   const nodes = {
     findOne: jest.fn(),
     find: jest.fn(),
@@ -50,7 +50,7 @@ function fixture() {
   const encryption = { encryptFile: jest.fn(), decryptFile: jest.fn() };
   const dataSource = { transaction: jest.fn() };
   const config = { get: jest.fn((key: string) => key === 'virtualDrive.defaultReplicationFactor' ? 1 : undefined) };
-  const service = new VirtualDriveService(nodes as never, objects as never, replicas as never, policies as never, accounts as never, queue as never, audit as never, config as never, dataSource as never, encryption as never, fileVersions as never);
+  const service = new VirtualDriveService(nodes as never, objects as never, replicas as never, policies as never, accounts as never, queue as never, audit as never, config as never, dataSource as never, encryption as never, fileVersions as never, undefined, permissions as never);
   return { service, nodes, objects, fileVersions, snapshotEntries, replicas, policies, accounts, queue, audit, encryption, dataSource };
 }
 
@@ -71,6 +71,29 @@ describe('VirtualDriveService', () => {
     fixtureData.nodes.findOne.mockResolvedValue(null);
 
     await expect(fixtureData.service.getNode('other-user', 'node-id')).rejects.toBeInstanceOf(NotFoundException);
+  });
+
+  it('allows a shared viewer to navigate the owner drive folder without changing ownership', async () => {
+    const permissions = { requireRead: jest.fn(), requireWrite: jest.fn() };
+    const folder = node({ id: 'shared-folder', userId: 'owner-id', name: 'Project', isRoot: false });
+    const child = node({ id: 'child-file', userId: 'owner-id', parentId: 'shared-folder', name: 'notes.txt', type: VirtualNodeType.FILE, isRoot: false });
+    const fixtureData = fixture(permissions);
+    fixtureData.nodes.findOne.mockResolvedValue(folder);
+    fixtureData.nodes.find.mockResolvedValue([child]);
+
+    const children = await fixtureData.service.getChildren('recipient-id', 'shared-folder');
+
+    expect(permissions.requireRead).toHaveBeenCalledWith('recipient-id', 'shared-folder');
+    expect(fixtureData.nodes.find).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ userId: 'owner-id', parentId: 'shared-folder' }) }));
+    expect(children[0]).toEqual(expect.objectContaining({ id: 'child-file', userId: 'owner-id' }));
+  });
+
+  it('blocks a viewer from creating a folder inside a shared parent', async () => {
+    const permissions = { requireRead: jest.fn(), requireWrite: jest.fn().mockRejectedValue(new ForbiddenException()) };
+    const fixtureData = fixture(permissions);
+
+    await expect(fixtureData.service.createFolder('viewer-id', { name: 'Nope', parentId: 'shared-folder' })).rejects.toBeInstanceOf(ForbiddenException);
+    expect(fixtureData.nodes.save).not.toHaveBeenCalled();
   });
 
   it('returns only safe version history fields for an owned file', async () => {

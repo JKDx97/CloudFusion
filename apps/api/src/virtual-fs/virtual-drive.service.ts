@@ -36,6 +36,7 @@ import { CloudDownload } from '../providers/common/cloud-file.interface';
 import { EncryptionService, DecryptionMetadata } from '../data-protection/encryption.service';
 import { DataProtectionException } from '../data-protection/data-protection-error';
 import { DataProtectionEventsService } from '../realtime/data-protection-events.service';
+import { PermissionsService } from '../permissions/permissions.service';
 
 export interface VirtualNodeResponse {
   id: string;
@@ -84,6 +85,7 @@ export class VirtualDriveService {
     private readonly encryption: EncryptionService,
     @InjectRepository(FileVersion) private readonly fileVersions: Repository<FileVersion>,
     @Optional() private readonly protectionEvents?: DataProtectionEventsService,
+    @Optional() private readonly permissions?: PermissionsService,
   ) {}
 
   async getRoot(userId: string): Promise<VirtualNodeResponse> {
@@ -91,26 +93,26 @@ export class VirtualDriveService {
   }
 
   async getNode(userId: string, id: string): Promise<VirtualNodeResponse> {
-    const node = await this.findOwned(id, userId);
+    const node = await this.findAccessible(id, userId);
     node.lastAccessedAt = new Date();
     return this.toResponse(await this.nodes.save(node));
   }
 
   async download(userId: string, id: string): Promise<CloudDownload> {
-    const node = await this.findOwned(id, userId);
+    const node = await this.findAccessible(id, userId);
     if (node.type !== VirtualNodeType.FILE || !node.storageObjectId) throw new BadRequestException('Only virtual files can be downloaded');
-    return this.downloadStorageObject(userId, node, node.storageObjectId);
+    return this.downloadStorageObject(node.userId, node, node.storageObjectId, userId);
   }
 
   async downloadVersion(userId: string, id: string, versionId: string): Promise<CloudDownload> {
-    const node = await this.findOwned(id, userId);
+    const node = await this.findAccessible(id, userId);
     if (node.type !== VirtualNodeType.FILE) throw new BadRequestException('Only virtual files can be downloaded');
     const version = await this.fileVersions.findOne({ where: { id: versionId, virtualNodeId: node.id } });
     if (!version) throw new NotFoundException('File version not found');
-    return this.downloadStorageObject(userId, node, version.storageObjectId);
+    return this.downloadStorageObject(node.userId, node, version.storageObjectId, userId);
   }
 
-  private async downloadStorageObject(userId: string, node: VirtualNode, storageObjectId: string): Promise<CloudDownload> {
+  private async downloadStorageObject(userId: string, node: VirtualNode, storageObjectId: string, actorUserId = userId): Promise<CloudDownload> {
     const object = await this.objects.createQueryBuilder('storageObject')
       .addSelect([
         'storageObject.encryptedDek',
@@ -134,7 +136,7 @@ export class VirtualDriveService {
         const download = await context.adapter.downloadFile(context.accessToken, context.account.id, replica.remoteFileId);
         node.lastAccessedAt = new Date();
         await this.nodes.save(node);
-        if (failures > 0) await this.audit.record(userId, 'REPLICA_FAILOVER', 'StorageObject', object.id, { selectedReplicaId: replica.id, failures });
+        if (failures > 0) await this.audit.record(actorUserId, 'REPLICA_FAILOVER', 'StorageObject', object.id, { selectedReplicaId: replica.id, failures });
         if (object.encryptionAlgorithm) {
           if (!object.encryptedDek || !object.dekIv || !object.dekAuthTag || !object.contentIv || !object.contentAuthTag || object.keyVersion == null || !object.encryptedChecksum || object.encryptedSize == null) {
             throw new DataProtectionException('CORRUPTED_ENCRYPTED_OBJECT');
@@ -183,22 +185,22 @@ export class VirtualDriveService {
   }
 
   async getChildren(userId: string, parentId?: string): Promise<VirtualNodeResponse[]> {
-    const parent = parentId ? await this.findOwned(parentId, userId) : await this.ensureRoot(userId);
+    const parent = parentId ? await this.findAccessible(parentId, userId) : await this.ensureRoot(userId);
     if (parent.type !== VirtualNodeType.FOLDER) throw new BadRequestException('Parent node must be a folder');
     const children = await this.nodes.find({
-      where: { userId, parentId: parent.id, deletedAt: IsNull() },
+      where: { userId: parent.userId, parentId: parent.id, deletedAt: IsNull() },
       order: { type: 'ASC', name: 'ASC' },
     });
     return children.map((node) => this.toResponse(node));
   }
 
   async createFolder(userId: string, dto: CreateVirtualFolderDto): Promise<VirtualNodeResponse> {
-    const parent = dto.parentId ? await this.findOwned(dto.parentId, userId) : await this.ensureRoot(userId);
+    const parent = dto.parentId ? await this.findWritable(dto.parentId, userId) : await this.ensureRoot(userId);
     if (parent.type !== VirtualNodeType.FOLDER) throw new BadRequestException('Parent node must be a folder');
     const name = this.cleanName(dto.name);
-    await this.ensureAvailableName(userId, parent.id, name);
+    await this.ensureAvailableName(parent.userId, parent.id, name);
     const folder = await this.nodes.save(this.nodes.create({
-      userId,
+      userId: parent.userId,
       parentId: parent.id,
       name,
       type: VirtualNodeType.FOLDER,
@@ -217,15 +219,19 @@ export class VirtualDriveService {
   }
 
   async upload(userId: string, file: Express.Multer.File, parentId?: string): Promise<VirtualUploadResult> {
-    return this.uploadContent(userId, file, parentId);
+    if (!file) throw new BadRequestException('A file is required');
+    if (!parentId) return this.uploadContent(userId, file, undefined, undefined, undefined, userId);
+    const parent = await this.findWritable(parentId, userId);
+    if (parent.type !== VirtualNodeType.FOLDER) throw new BadRequestException('Parent node must be a folder');
+    return this.uploadContent(parent.userId, file, parent.id, undefined, undefined, userId);
   }
 
   async uploadVersion(userId: string, id: string, file: Express.Multer.File, comment?: string): Promise<VirtualUploadResult> {
-    const node = await this.findOwned(id, userId);
+    const node = await this.findWritable(id, userId);
     if (node.type !== VirtualNodeType.FILE) throw new BadRequestException('Only files can have new versions');
     const normalizedComment = comment?.trim() || undefined;
     if (normalizedComment && normalizedComment.length > 500) throw new BadRequestException('Version comments must be 500 characters or fewer');
-    return this.uploadContent(userId, file, node.parentId ?? undefined, node.id, normalizedComment);
+    return this.uploadContent(node.userId, file, node.parentId ?? undefined, node.id, normalizedComment, userId);
   }
 
   private async uploadContent(
@@ -234,6 +240,7 @@ export class VirtualDriveService {
     parentId?: string,
     versionNodeId?: string,
     versionComment?: string,
+    actorUserId = userId,
   ): Promise<VirtualUploadResult> {
     if (!file) throw new BadRequestException('A file is required');
     const targetNode = versionNodeId ? await this.findOwned(versionNodeId, userId) : null;
@@ -316,7 +323,7 @@ export class VirtualDriveService {
             versionNumber: await nextVersionNumber(versionTarget?.id),
             size: String(encrypted.logicalSize),
             checksum: encrypted.checksum,
-            createdBy: userId,
+            createdBy: actorUserId,
             comment: versionComment ?? null,
           }));
           sharedNode.currentVersionId = version.id;
@@ -372,7 +379,7 @@ export class VirtualDriveService {
           versionNumber: await nextVersionNumber(versionTarget?.id),
           size: String(encrypted.logicalSize),
           checksum: encrypted.checksum,
-          createdBy: userId,
+          createdBy: actorUserId,
           comment: versionComment ?? null,
         }));
         node.currentVersionId = version.id;
@@ -385,7 +392,7 @@ export class VirtualDriveService {
       this.protectionEvents?.emit(userId, 'VERSION_CREATED', version.id, 'CREATED', { nodeId: node.id, versionNumber: version.versionNumber, deduplicated: created.deduplicated });
       if (created.deduplicated) {
         const replicaCount = await this.replicas.count({ where: { storageObjectId: storageObject.id } });
-        await this.audit.record(userId, versionNodeId ? 'VIRTUAL_FILE_VERSION_CREATED' : 'VIRTUAL_UPLOAD_DEDUPLICATED', 'VirtualNode', node.id, { storageObjectId: storageObject.id, versionNumber: version.versionNumber });
+        await this.audit.record(actorUserId, versionNodeId ? 'VIRTUAL_FILE_VERSION_CREATED' : 'VIRTUAL_UPLOAD_DEDUPLICATED', 'VirtualNode', node.id, { storageObjectId: storageObject.id, versionNumber: version.versionNumber });
         return { node: this.toResponse(node), queued: false, replicas: replicaCount, deduplicated: true, version: versionInfo };
       }
 
@@ -395,7 +402,7 @@ export class VirtualDriveService {
         node.status = VirtualNodeStatus.UNAVAILABLE;
         await this.objects.save(storageObject);
         await this.nodes.save(node);
-        await this.audit.record(userId, 'VIRTUAL_UPLOAD_UNAVAILABLE', 'VirtualNode', node.id, { reason: 'NO_CONNECTED_STORAGE_ACCOUNT' });
+        await this.audit.record(actorUserId, 'VIRTUAL_UPLOAD_UNAVAILABLE', 'VirtualNode', node.id, { reason: 'NO_CONNECTED_STORAGE_ACCOUNT' });
         return { node: this.toResponse(node), queued: false, replicas: 0, version: versionInfo, warning: 'Conecta al menos una cuenta cloud para guardar físicamente el archivo.' };
       }
       const replicaEntities = await this.replicas.save(destinations.map((account) => this.replicas.create({
@@ -429,7 +436,7 @@ export class VirtualDriveService {
         await this.nodes.save(node);
         await this.objects.save(storageObject);
       }
-      await this.audit.record(userId, versionNodeId ? 'VIRTUAL_FILE_VERSION_CREATED' : 'VIRTUAL_UPLOAD_QUEUED', 'VirtualNode', node.id, { replicationFactor: replicaEntities.length, versionNumber: version.versionNumber });
+      await this.audit.record(actorUserId, versionNodeId ? 'VIRTUAL_FILE_VERSION_CREATED' : 'VIRTUAL_UPLOAD_QUEUED', 'VirtualNode', node.id, { replicationFactor: replicaEntities.length, versionNumber: version.versionNumber });
       return { node: this.toResponse(node), queued, replicas: replicaEntities.length, version: versionInfo };
     } finally {
       if (!handedToWorker) await unlink(encryptedPath).catch(() => undefined);
@@ -437,10 +444,10 @@ export class VirtualDriveService {
   }
 
   async rename(userId: string, id: string, dto: UpdateVirtualNodeDto): Promise<VirtualNodeResponse> {
-    const node = await this.findOwned(id, userId);
+    const node = await this.findWritable(id, userId);
     if (node.isRoot) throw new BadRequestException('The drive root cannot be renamed');
     const name = this.cleanName(dto.name);
-    await this.ensureAvailableName(userId, node.parentId, name, node.id);
+    await this.ensureAvailableName(node.userId, node.parentId, name, node.id);
     node.name = name;
     const saved = await this.nodes.save(node);
     await this.audit.record(userId, 'VIRTUAL_NODE_RENAMED', 'VirtualNode', id, { name });
@@ -448,12 +455,13 @@ export class VirtualDriveService {
   }
 
   async move(userId: string, id: string, dto: MoveVirtualNodeDto): Promise<VirtualNodeResponse> {
-    const node = await this.findOwned(id, userId);
+    const node = await this.findWritable(id, userId);
     if (node.isRoot) throw new BadRequestException('The drive root cannot be moved');
-    const parent = dto.parentId ? await this.findOwned(dto.parentId, userId) : await this.ensureRoot(userId);
+    const parent = dto.parentId ? await this.findWritable(dto.parentId, userId) : await this.ensureRoot(userId);
+    if (parent.userId !== node.userId) throw new BadRequestException('A shared resource cannot be moved outside its owner drive');
     if (parent.type !== VirtualNodeType.FOLDER) throw new BadRequestException('Destination must be a folder');
-    if (parent.id === node.id || await this.isDescendant(parent.id, node.id, userId)) throw new BadRequestException('Cannot move a folder inside itself');
-    await this.ensureAvailableName(userId, parent.id, node.name, node.id);
+    if (parent.id === node.id || await this.isDescendant(parent.id, node.id, node.userId)) throw new BadRequestException('Cannot move a folder inside itself');
+    await this.ensureAvailableName(node.userId, parent.id, node.name, node.id);
     const previousParentId = node.parentId;
     node.parentId = parent.id;
     const saved = await this.nodes.save(node);
@@ -462,9 +470,9 @@ export class VirtualDriveService {
   }
 
   async trash(userId: string, id: string): Promise<{ deleted: true }> {
-    const node = await this.findOwned(id, userId);
+    const node = await this.findWritable(id, userId);
     if (node.isRoot) throw new BadRequestException('The drive root cannot be deleted');
-    const descendants = await this.collectTree(userId, node);
+    const descendants = await this.collectTree(node.userId, node);
     const now = new Date();
     for (const item of [node, ...descendants]) {
       item.previousParentId = item.parentId;
@@ -570,7 +578,7 @@ export class VirtualDriveService {
     comment: string | null;
     current: boolean;
   }>> {
-    const node = await this.findOwned(id, userId);
+    const node = await this.findAccessible(id, userId);
     if (node.type !== VirtualNodeType.FILE) throw new BadRequestException('Version history is only available for files');
     const versions = await this.fileVersions.find({ where: { virtualNodeId: node.id }, order: { versionNumber: 'DESC' } });
     return versions.map((version) => ({
@@ -585,15 +593,16 @@ export class VirtualDriveService {
   }
 
   async restoreVersion(userId: string, id: string, versionId: string): Promise<VirtualNodeResponse> {
-    const ownedNode = await this.findOwned(id, userId);
-    if (ownedNode.type !== VirtualNodeType.FILE) throw new BadRequestException('Only files can restore versions');
+    const writableNode = await this.findWritable(id, userId);
+    if (writableNode.type !== VirtualNodeType.FILE) throw new BadRequestException('Only files can restore versions');
+    const ownerUserId = writableNode.userId;
     const restored = await this.dataSource.transaction(async (manager) => {
       const nodeRepository = manager.getRepository(VirtualNode);
       const objectRepository = manager.getRepository(StorageObject);
       const versionRepository = manager.getRepository(FileVersion);
       const node = await nodeRepository.createQueryBuilder('virtualNode')
         .setLock('pessimistic_write')
-        .where('virtualNode.id = :id AND virtualNode.userId = :userId AND virtualNode.deletedAt IS NULL', { id, userId })
+        .where('virtualNode.id = :id AND virtualNode.userId = :ownerUserId AND virtualNode.deletedAt IS NULL', { id, ownerUserId })
         .getOne();
       if (!node || node.type !== VirtualNodeType.FILE) throw new NotFoundException('Virtual file not found');
       const source = await versionRepository.findOne({ where: { id: versionId, virtualNodeId: node.id } });
@@ -602,7 +611,7 @@ export class VirtualDriveService {
         .setLock('pessimistic_write')
         .where('storageObject.id = :objectId AND storageObject.userId = :userId AND storageObject.lifecycleStatus = :active', {
           objectId: source.storageObjectId,
-          userId,
+          userId: ownerUserId,
           active: 'ACTIVE',
         })
         .getOne();
@@ -744,6 +753,20 @@ export class VirtualDriveService {
     const node = await this.nodes.findOne({ where: { id, userId, ...(includeDeleted ? {} : { deletedAt: IsNull() }) } });
     if (!node) throw new NotFoundException('Virtual node not found');
     return node;
+  }
+
+  private async findAccessible(id: string, userId: string): Promise<VirtualNode> {
+    if (!this.permissions) return this.findOwned(id, userId);
+    await this.permissions.requireRead(userId, id);
+    const node = await this.nodes.findOne({ where: { id, deletedAt: IsNull() } });
+    if (!node) throw new NotFoundException('Virtual node not found');
+    return node;
+  }
+
+  private async findWritable(id: string, userId: string): Promise<VirtualNode> {
+    if (!this.permissions) return this.findOwned(id, userId);
+    await this.permissions.requireWrite(userId, id);
+    return this.findAccessible(id, userId);
   }
 
   private async ensureAvailableName(userId: string, parentId: string | null, name: string, exceptId?: string): Promise<void> {
