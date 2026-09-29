@@ -3,9 +3,9 @@ import { Component, DestroyRef, OnInit, inject, signal } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { Router, RouterLink } from '@angular/router';
 import { CloudService } from '../../core/cloud/cloud.service';
-import { FileVersionRecord, VirtualNode } from '../../shared/models/cloud.model';
+import { FileVersionRecord, ResourceShareRecord, ResourceShareRole, ShareUser, VirtualNode } from '../../shared/models/cloud.model';
 
-type DriveSection = 'drive' | 'recent' | 'favorites' | 'trash';
+type DriveSection = 'drive' | 'recent' | 'favorites' | 'shared' | 'trash';
 
 @Component({
   standalone: true,
@@ -29,6 +29,17 @@ export class DriveComponent implements OnInit {
   readonly versions = signal<FileVersionRecord[]>([]);
   readonly versionLoading = signal(false);
   readonly versionComment = signal('');
+  readonly shareRoles = signal<Record<string, ResourceShareRole>>({});
+  readonly shareOwners = signal<Record<string, string>>({});
+  readonly activeShareRole = signal<ResourceShareRole | null>(null);
+  readonly shareTarget = signal<VirtualNode | null>(null);
+  readonly shareEntries = signal<ResourceShareRecord[]>([]);
+  readonly shareEmail = signal('');
+  readonly shareRole = signal<ResourceShareRole>('VIEWER');
+  readonly shareQuery = signal('');
+  readonly shareUsers = signal<ShareUser[]>([]);
+  readonly shareBusy = signal(false);
+  readonly shareError = signal<string | null>(null);
 
   ngOnInit(): void { this.openDrive(); }
 
@@ -51,13 +62,28 @@ export class DriveComponent implements OnInit {
     this.section.set(section);
     this.currentParent.set(null);
     this.breadcrumbs.set([]);
+    this.activeShareRole.set(null);
     this.loading.set(true);
+    if (section === 'shared') {
+      this.cloud.getSharedWithMe().pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+        next: (page) => {
+          this.shareRoles.set(Object.fromEntries(page.items.map((item) => [item.node.id, item.role])));
+          this.shareOwners.set(Object.fromEntries(page.items.map((item) => [item.node.id, item.user?.username ?? 'Usuario CloudFusion'])));
+          this.nodes.set(page.items.map((item) => this.asVirtualNode(item)));
+          this.loading.set(false);
+        },
+        error: () => this.fail('No se pudieron cargar los archivos compartidos contigo.'),
+      });
+      return;
+    }
     const request = section === 'recent' ? this.cloud.getVirtualRecent() : section === 'favorites' ? this.cloud.getVirtualFavorites() : this.cloud.getVirtualTrash();
     request.pipe(takeUntilDestroyed(this.destroyRef)).subscribe({ next: (nodes) => { this.nodes.set(nodes); this.loading.set(false); }, error: () => this.fail('No se pudo cargar esta vista.') });
   }
 
   openFolder(node: VirtualNode): void {
-    this.section.set('drive');
+    if (this.section() !== 'shared') this.section.set('drive');
+    const directRole = this.shareRoles()[node.id];
+    if (directRole) this.activeShareRole.set(directRole);
     this.loading.set(true);
     this.cloud.getVirtualChildren(node.id).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
       next: (nodes) => { this.currentParent.set(node); this.breadcrumbs.update((items) => [...items, node]); this.nodes.set(nodes); this.loading.set(false); },
@@ -66,9 +92,11 @@ export class DriveComponent implements OnInit {
   }
 
   goTo(index: number): void {
-    if (index < 0) { this.openDrive(); return; }
+    if (index < 0) { this.openSection(this.section() === 'shared' ? 'shared' : 'drive'); return; }
     const target = this.breadcrumbs()[index];
     if (!target) return;
+    const directRole = this.shareRoles()[target.id];
+    if (directRole) this.activeShareRole.set(directRole);
     this.loading.set(true);
     this.cloud.getVirtualChildren(target.id).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
       next: (nodes) => { this.currentParent.set(target); this.breadcrumbs.set(this.breadcrumbs().slice(0, index + 1)); this.nodes.set(nodes); this.loading.set(false); },
@@ -170,6 +198,108 @@ export class DriveComponent implements OnInit {
     });
   }
 
+  openShareDialog(node: VirtualNode): void {
+    this.shareTarget.set(node);
+    this.shareEmail.set('');
+    this.shareRole.set('VIEWER');
+    this.shareQuery.set('');
+    this.shareUsers.set([]);
+    this.shareError.set(null);
+    this.shareBusy.set(true);
+    this.cloud.getSharesCreated(1, 100, node.id).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: (page) => { this.shareEntries.set(page.items); this.shareBusy.set(false); },
+      error: () => { this.shareEntries.set([]); this.shareBusy.set(false); this.shareError.set('No se pudo cargar la lista de personas.'); },
+    });
+  }
+
+  closeShareDialog(): void {
+    this.shareTarget.set(null);
+    this.shareEntries.set([]);
+    this.shareUsers.set([]);
+    this.shareError.set(null);
+  }
+
+  searchShareUsers(): void {
+    const query = this.shareQuery().trim();
+    if (query.length < 2) { this.shareError.set('Escribe al menos 2 caracteres para buscar.'); return; }
+    this.shareBusy.set(true);
+    this.shareError.set(null);
+    this.cloud.searchShareUsers(query).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: (result) => { this.shareUsers.set(result.items); this.shareBusy.set(false); },
+      error: () => { this.shareUsers.set([]); this.shareBusy.set(false); this.shareError.set('No se pudo buscar el usuario.'); },
+    });
+  }
+
+  chooseShareUser(user: ShareUser): void {
+    this.shareEmail.set(user.email);
+    this.shareUsers.set([]);
+    this.shareQuery.set(user.email);
+  }
+
+  createShare(): void {
+    const target = this.shareTarget();
+    const email = this.shareEmail().trim();
+    if (!target || !email) { this.shareError.set('Escribe el correo de una cuenta CloudFusion.'); return; }
+    this.shareBusy.set(true);
+    this.shareError.set(null);
+    this.cloud.createResourceShare(target.id, email, this.shareRole()).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: () => {
+        this.shareEmail.set('');
+        this.shareUsers.set([]);
+        this.loadShareEntries(target.id);
+      },
+      error: () => { this.shareBusy.set(false); this.shareError.set('No se pudo compartir. Revisa que el correo pertenezca a una cuenta activa de CloudFusion.'); },
+    });
+  }
+
+  changeShareRole(entry: ResourceShareRecord, event: Event): void {
+    const role = (event.target as HTMLSelectElement).value as ResourceShareRole;
+    this.cloud.updateResourceShare(entry.id, role).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: () => this.loadShareEntries(entry.node.id),
+      error: () => this.shareError.set('No se pudo cambiar el permiso.'),
+    });
+  }
+
+  revokeShare(entry: ResourceShareRecord): void {
+    if (!window.confirm(`¿Quitar el acceso de ${entry.user?.email ?? 'esta persona'}?`)) return;
+    this.cloud.revokeResourceShare(entry.id).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: () => this.loadShareEntries(entry.node.id),
+      error: () => this.shareError.set('No se pudo revocar el acceso.'),
+    });
+  }
+
+  canWriteNode(node: VirtualNode): boolean {
+    if (this.section() !== 'shared') return this.section() === 'drive';
+    return (this.shareRoles()[node.id] ?? this.activeShareRole()) === 'EDITOR';
+  }
+
+  canWriteCurrentFolder(): boolean {
+    return this.section() === 'drive' || (this.section() === 'shared' && this.activeShareRole() === 'EDITOR');
+  }
+
+  private loadShareEntries(nodeId: string): void {
+    this.cloud.getSharesCreated(1, 100, nodeId).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: (page) => { this.shareEntries.set(page.items); this.shareBusy.set(false); },
+      error: () => { this.shareBusy.set(false); this.shareError.set('No se pudo actualizar la lista de personas.'); },
+    });
+  }
+
+  private asVirtualNode(entry: ResourceShareRecord): VirtualNode {
+    return {
+      ...entry.node,
+      userId: entry.user?.id ?? '',
+      status: 'AVAILABLE',
+      storageObjectId: null,
+      currentVersionId: null,
+      isRoot: false,
+      isFavorite: false,
+      deletedAt: null,
+      lastAccessedAt: null,
+      createdAt: entry.createdAt,
+      updatedAt: entry.updatedAt,
+    };
+  }
+
   private saveDownload(blob: Blob, fileName: string): void {
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
@@ -188,7 +318,7 @@ export class DriveComponent implements OnInit {
 
   statusLabel(status: VirtualNode['status']): string { return ({ AVAILABLE: 'Disponible', UPLOADING: 'Subiendo', DEGRADED: 'Degradado', UNAVAILABLE: 'Sin réplica', DELETING: 'En papelera', ERROR: 'Error' } satisfies Record<VirtualNode['status'], string>)[status]; }
   isTrash(): boolean { return this.section() === 'trash'; }
-  title(): string { return ({ drive: 'Mi Drive', recent: 'Recientes', favorites: 'Favoritos', trash: 'Papelera' } as Record<DriveSection, string>)[this.section()]; }
+  title(): string { return ({ drive: 'Mi Drive', recent: 'Recientes', favorites: 'Favoritos', shared: 'Compartido conmigo', trash: 'Papelera' } as Record<DriveSection, string>)[this.section()]; }
 
   private loadChildren(root: VirtualNode): void { this.cloud.getVirtualChildren(root.id).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({ next: (nodes) => { this.nodes.set(nodes); this.loading.set(false); }, error: () => this.fail('No se pudo cargar el contenido.') }); }
   private reload(): void { this.section() === 'drive' ? (this.currentParent() ? this.loadChildren(this.currentParent() as VirtualNode) : this.openDrive()) : this.openSection(this.section()); }

@@ -4,7 +4,7 @@ import { Observable, map } from 'rxjs';
 import { AuthService } from '../auth/auth.service';
 import { environment } from '../../../environments/environment';
 import { ApiResponse } from '../../shared/models/api-response.model';
-import { BackupJobRecord, BackupPolicyRecord, CloudAccount, CloudAccountImpactRecord, CloudFile, CloudProvider, CloudSearchResponse, CloudStorageSummary, DataProtectionEventRecord, FileVersionRecord, ProtectionAlertRecord, ProtectionOverviewRecord, SnapshotEntryRecord, SnapshotRecord, SnapshotRestoreJobRecord, StorageRule, TransferJob, TransferProgressEvent, TransferOperation, VirtualNode } from '../../shared/models/cloud.model';
+import { BackupJobRecord, BackupPolicyRecord, CloudAccount, CloudAccountImpactRecord, CloudFile, CloudProvider, CloudSearchResponse, CloudStorageSummary, DataProtectionEventRecord, FileVersionRecord, ProtectionAlertRecord, ProtectionOverviewRecord, ResourceShareRecord, ResourceShareRole, SharePage, ShareUserSearchResult, SnapshotEntryRecord, SnapshotRecord, SnapshotRestoreJobRecord, StorageRule, TransferJob, TransferProgressEvent, TransferOperation, VirtualNode } from '../../shared/models/cloud.model';
 
 @Injectable({ providedIn: 'root' })
 export class CloudService {
@@ -50,8 +50,10 @@ export class CloudService {
     return this.http.get(`${this.apiUrl}/cloud-files/${accountId}/${fileId}/download`, { responseType: 'blob' });
   }
 
-  connect(provider: CloudProvider): void {
-    window.location.assign(`${this.apiUrl}/cloud-accounts/${provider === 'GOOGLE_DRIVE' ? 'google' : 'onedrive'}/connect`);
+  connect(provider: CloudProvider): Observable<string> {
+    const providerPath = provider === 'GOOGLE_DRIVE' ? 'google' : 'onedrive';
+    return this.http.post<ApiResponse<{ authorizationUrl: string }>>(`${this.apiUrl}/cloud-accounts/${providerPath}/connect`, {})
+      .pipe(map((response) => response.data.authorizationUrl));
   }
 
   refreshAccount(accountId: string): Observable<CloudAccount> {
@@ -152,6 +154,34 @@ export class CloudService {
 
   getVirtualChildren(parentId: string): Observable<VirtualNode[]> {
     return this.http.get<ApiResponse<VirtualNode[]>>(`${this.apiUrl}/virtual-drive/nodes/${parentId}/children`).pipe(map((response) => response.data));
+  }
+
+  getSharedWithMe(page = 1, limit = 25): Observable<SharePage> {
+    const params = new HttpParams().set('page', page).set('limit', limit);
+    return this.http.get<ApiResponse<SharePage>>(`${this.apiUrl}/shares/received`, { params }).pipe(map((response) => response.data));
+  }
+
+  getSharesCreated(page = 1, limit = 100, nodeId?: string): Observable<SharePage> {
+    let params = new HttpParams().set('page', page).set('limit', limit);
+    if (nodeId) params = params.set('nodeId', nodeId);
+    return this.http.get<ApiResponse<SharePage>>(`${this.apiUrl}/shares/created`, { params }).pipe(map((response) => response.data));
+  }
+
+  searchShareUsers(query: string, page = 1): Observable<ShareUserSearchResult> {
+    const params = new HttpParams().set('q', query).set('page', page).set('limit', 10);
+    return this.http.get<ApiResponse<ShareUserSearchResult>>(`${this.apiUrl}/shares/users`, { params }).pipe(map((response) => response.data));
+  }
+
+  createResourceShare(nodeId: string, email: string, role: ResourceShareRole): Observable<ResourceShareRecord> {
+    return this.http.post<ApiResponse<ResourceShareRecord>>(`${this.apiUrl}/shares`, { nodeId, email, role }).pipe(map((response) => response.data));
+  }
+
+  updateResourceShare(id: string, role: ResourceShareRole): Observable<ResourceShareRecord> {
+    return this.http.patch<ApiResponse<ResourceShareRecord>>(`${this.apiUrl}/shares/${id}`, { role }).pipe(map((response) => response.data));
+  }
+
+  revokeResourceShare(id: string): Observable<{ revoked: true }> {
+    return this.http.delete<ApiResponse<{ revoked: true }>>(`${this.apiUrl}/shares/${id}`).pipe(map((response) => response.data));
   }
 
   createVirtualFolder(name: string, parentId?: string): Observable<VirtualNode> {

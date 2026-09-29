@@ -63,6 +63,38 @@ export interface VirtualNode {
   updatedAt: string;
 }
 
+export type ResourceShareRole = 'VIEWER' | 'EDITOR';
+
+export interface ResourceShareRecord {
+  id: string;
+  node: Pick<VirtualNode, 'id' | 'name' | 'type' | 'mimeType' | 'size' | 'parentId'>;
+  role: ResourceShareRole;
+  status: 'ACTIVE' | 'REVOKED';
+  createdAt: string;
+  updatedAt: string;
+  user: { id: string; username: string; email: string } | null;
+}
+
+export interface SharePage {
+  items: ResourceShareRecord[];
+  page: number;
+  limit: number;
+  total: number;
+}
+
+export interface ShareUser {
+  id: string;
+  username: string;
+  email: string;
+}
+
+export interface ShareUserSearchResult {
+  items: ShareUser[];
+  page: number;
+  limit: number;
+  total: number;
+}
+
 export interface FileVersionRecord {
   id: string;
   versionNumber: number;

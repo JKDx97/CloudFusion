@@ -75,7 +75,7 @@ export class SharingService {
 
   async created(userId: string, query: ShareListQueryDto) {
     const [shares, total] = await this.shares.findAndCount({
-      where: { ownerUserId: userId, status: ResourceShareStatus.ACTIVE, revokedAt: IsNull() },
+      where: { ownerUserId: userId, status: ResourceShareStatus.ACTIVE, revokedAt: IsNull(), ...(query.nodeId ? { nodeId: query.nodeId } : {}) },
       order: { createdAt: 'DESC' },
       skip: (query.page - 1) * query.limit,
       take: query.limit,

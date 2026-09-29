@@ -1,5 +1,5 @@
 import { Type } from 'class-transformer';
-import { IsInt, IsOptional, Max, Min } from 'class-validator';
+import { IsInt, IsOptional, IsUUID, Max, Min } from 'class-validator';
 
 export class ShareListQueryDto {
   @IsOptional()
@@ -14,4 +14,8 @@ export class ShareListQueryDto {
   @Min(1)
   @Max(100)
   limit = 25;
+
+  @IsOptional()
+  @IsUUID()
+  nodeId?: string;
 }
