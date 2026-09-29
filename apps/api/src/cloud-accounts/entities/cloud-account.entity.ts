@@ -10,6 +10,7 @@ import {
 } from 'typeorm';
 import { User } from '../../users/entities/user.entity';
 import { CloudAccountStatus, CloudProvider } from '../../providers/common/cloud-provider.enum';
+import { CloudCredentialType } from './cloud-credential-type.enum';
 
 @Entity('cloud_accounts')
 @Index(['userId'])
@@ -37,6 +38,15 @@ export class CloudAccount {
   @Column({ name: 'display_name', type: 'varchar', nullable: true, length: 255 })
   displayName!: string | null;
 
+  @Column({ name: 'credential_type', type: 'varchar', length: 32, default: CloudCredentialType.OAUTH2 })
+  credentialType: CloudCredentialType = CloudCredentialType.OAUTH2;
+
+  @Column({ name: 'credentials_encrypted', type: 'text', nullable: true })
+  credentialsEncrypted!: string | null;
+
+  @Column({ name: 'configuration_encrypted', type: 'text', nullable: true })
+  configurationEncrypted!: string | null;
+
   @Column({ name: 'access_token_encrypted', type: 'text' })
   accessTokenEncrypted!: string;
 
@@ -60,6 +70,9 @@ export class CloudAccount {
 
   @Column({ name: 'last_sync_at', type: 'timestamptz', nullable: true })
   lastSyncAt!: Date | null;
+
+  @Column({ name: 'last_health_check_at', type: 'timestamptz', nullable: true })
+  lastHealthCheckAt!: Date | null;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt!: Date;

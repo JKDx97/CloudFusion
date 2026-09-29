@@ -1,5 +1,22 @@
-export type CloudProvider = 'GOOGLE_DRIVE' | 'ONEDRIVE';
-export type CloudAccountStatus = 'CONNECTED' | 'REAUTH_REQUIRED' | 'DISCONNECTED';
+export type CloudProvider =
+  | 'GOOGLE_DRIVE'
+  | 'ONEDRIVE'
+  | 'DROPBOX'
+  | 'BOX'
+  | 'PCLOUD'
+  | 'MEGA'
+  | 'AWS_S3'
+  | 'CLOUDFLARE_R2'
+  | 'WASABI'
+  | 'BACKBLAZE_B2'
+  | 'DIGITALOCEAN_SPACES'
+  | 'AZURE_BLOB'
+  | 'GOOGLE_CLOUD_STORAGE'
+  | 'ORACLE_OBJECT_STORAGE'
+  | 'IBM_COS'
+  | 'CUSTOM_S3'
+  | 'MEDIAFIRE';
+export type CloudAccountStatus = 'CONNECTED' | 'REAUTH_REQUIRED' | 'DISCONNECTED' | 'DEGRADED' | 'RATE_LIMITED' | 'UNAVAILABLE' | 'DISABLED';
 
 export interface CloudStorage {
   used: number;
@@ -12,9 +29,11 @@ export interface CloudAccount {
   email: string | null;
   displayName: string | null;
   status: CloudAccountStatus;
+  credentialType?: 'OAUTH2' | 'ACCESS_KEY' | 'API_TOKEN' | 'SERVICE_ACCOUNT' | 'CUSTOM';
   storage: CloudStorage;
   scopes: string[];
   lastSyncAt: string | null;
+  lastHealthCheckAt?: string | null;
   createdAt: string;
   updatedAt: string;
 }

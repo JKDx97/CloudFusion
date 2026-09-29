@@ -26,8 +26,8 @@ export class S3CompatibleProviderFactory {
 
     const allowPrivateEndpoints = process.env.PROVIDER_CUSTOM_S3_ALLOW_PRIVATE_ENDPOINTS === 'true';
     const endpoint = target.endpoint ? await validateEndpoint(target.endpoint, allowPrivateEndpoints) : undefined;
-    if (target.providerId === ProviderId.CUSTOM_S3 && !endpoint) {
-      throw new BadRequestException('A custom S3 endpoint is required');
+    if (target.providerId !== ProviderId.AWS_S3 && !endpoint) {
+      throw new BadRequestException('An endpoint is required for S3-compatible providers');
     }
 
     const prefix = normalizePrefix(target.prefix ?? '');

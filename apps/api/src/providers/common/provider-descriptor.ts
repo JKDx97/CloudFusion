@@ -96,10 +96,8 @@ export function emptyProviderCapabilities(): ProviderCapabilities {
 }
 
 export function providerId(provider: CloudProvider): ProviderId {
-  switch (provider) {
-    case CloudProvider.GOOGLE_DRIVE:
-      return ProviderId.GOOGLE_DRIVE;
-    case CloudProvider.ONEDRIVE:
-      return ProviderId.ONEDRIVE;
-  }
+  const value: string = provider;
+  const id = Object.values(ProviderId).find((candidate) => candidate === value);
+  if (!id) throw new Error(`Provider identifier is not registered: ${value}`);
+  return id;
 }

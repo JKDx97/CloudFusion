@@ -9,6 +9,7 @@ import {
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { CloudAccount } from './entities/cloud-account.entity';
+import { CloudCredentialType } from './entities/cloud-credential-type.enum';
 import { CloudAccountStatus, CloudProvider } from '../providers/common/cloud-provider.enum';
 import { CloudProviderResolver } from '../providers/common/cloud-provider-resolver.service';
 import { CloudProviderAdapter, ProviderTokenSet } from '../providers/common/cloud-provider.interface';
@@ -20,12 +21,14 @@ import { AccountImpactService, CloudAccountImpact } from './account-impact.servi
 export interface CloudAccountPublic {
   id: string;
   provider: CloudProvider;
+  credentialType: CloudCredentialType;
   email: string | null;
   displayName: string | null;
   status: CloudAccountStatus;
   storage: { used: number; total: number | null };
   scopes: string[];
   lastSyncAt: Date | null;
+  lastHealthCheckAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -61,6 +64,7 @@ export class CloudAccountService {
         .filter(
           (account) =>
             account.status === CloudAccountStatus.CONNECTED &&
+            (account.credentialType ?? CloudCredentialType.OAUTH2) === CloudCredentialType.OAUTH2 &&
             (!account.lastSyncAt || Date.now() - account.lastSyncAt.getTime() > 60_000),
         )
         .map(async (account) => {
@@ -162,6 +166,8 @@ export class CloudAccountService {
     account.status = CloudAccountStatus.DISCONNECTED;
     account.accessTokenEncrypted = '';
     account.refreshTokenEncrypted = null;
+    account.credentialsEncrypted = null;
+    account.configurationEncrypted = null;
     account.tokenExpiresAt = new Date(0);
     await this.repository.save(account);
     return { disconnected: true };
@@ -169,6 +175,9 @@ export class CloudAccountService {
 
   async getAuthorizedAccount(userId: string, accountId: string, forceRefresh = false): Promise<AuthorizedCloudAccount> {
     const account = await this.getOwnedAccount(userId, accountId);
+    if (account.credentialType !== CloudCredentialType.OAUTH2) {
+      throw new ProviderException(ProviderErrorCode.PROVIDER_CAPABILITY_NOT_SUPPORTED, 501);
+    }
     if (account.status !== CloudAccountStatus.CONNECTED) {
       throw new ProviderException(ProviderErrorCode.ACCOUNT_NOT_CONNECTED, 409);
     }
@@ -205,6 +214,7 @@ export class CloudAccountService {
     return {
       id: account.id,
       provider: account.provider,
+      credentialType: account.credentialType ?? CloudCredentialType.OAUTH2,
       email: account.email,
       displayName: account.displayName,
       status: account.status,
@@ -214,6 +224,7 @@ export class CloudAccountService {
       },
       scopes: account.scopes ?? [],
       lastSyncAt: account.lastSyncAt,
+      lastHealthCheckAt: account.lastHealthCheckAt ?? null,
       createdAt: account.createdAt,
       updatedAt: account.updatedAt,
     };

@@ -17,12 +17,16 @@ describe('ProviderRegistryService', () => {
     const google = catalog.find((entry) => entry.id === ProviderId.GOOGLE_DRIVE);
     const dropbox = catalog.find((entry) => entry.id === ProviderId.DROPBOX);
     const s3 = catalog.find((entry) => entry.id === ProviderId.AWS_S3);
+    const r2 = catalog.find((entry) => entry.id === ProviderId.CLOUDFLARE_R2);
 
     expect(google?.supportStatus).toBe(ProviderSupportStatus.BETA);
     expect(google?.capabilities.search).toBe(true);
     expect(dropbox?.supportStatus).toBe(ProviderSupportStatus.COMING_SOON);
     expect(s3?.category).toBe(ProviderCategory.OBJECT_STORAGE);
-    expect(s3?.capabilities).toEqual(expect.objectContaining({ list: false, multipartUpload: false }));
+    expect(s3?.supportStatus).toBe(ProviderSupportStatus.BETA);
+    expect(s3?.capabilities).toEqual(expect.objectContaining({ list: true, multipartUpload: true, rangeDownload: true }));
+    expect(r2?.supportStatus).toBe(ProviderSupportStatus.BETA);
+    expect(r2?.capabilities).toEqual(expect.objectContaining({ list: true, multipartUpload: true, rangeDownload: true }));
     expect(new Set(catalog.map((entry) => entry.id)).size).toBe(catalog.length);
     expect(JSON.stringify(catalog).toLowerCase()).not.toContain('secret');
   });

@@ -16,8 +16,16 @@ describe('S3CompatibleProviderFactory', () => {
   });
 
   it('requires a custom endpoint and credentials before constructing a client', async () => {
-    await expect(factory.create({ ...target, endpoint: undefined }, credentials)).rejects.toThrow('A custom S3 endpoint is required');
+    await expect(factory.create({ ...target, endpoint: undefined }, credentials)).rejects.toThrow('An endpoint is required for S3-compatible providers');
+    await expect(factory.create({ ...target, providerId: ProviderId.CLOUDFLARE_R2, endpoint: undefined }, credentials)).rejects.toThrow('An endpoint is required for S3-compatible providers');
     await expect(factory.create(target, { accessKeyId: 'id', secretAccessKey: '' })).rejects.toThrow('S3 access credentials are required');
+  });
+
+  it('uses the common adapter for an S3 preset when an explicit endpoint is supplied', async () => {
+    const adapter = await factory.create({ ...target, providerId: ProviderId.CLOUDFLARE_R2 }, credentials);
+    expect(adapter.providerId).toBe(ProviderId.CLOUDFLARE_R2);
+    expect(adapter.capabilities).toMatchObject({ list: true, multipartUpload: true, rangeDownload: true });
+    adapter.close();
   });
 
   it('rejects malformed, cloud metadata, and private network endpoints by default', async () => {

@@ -1,0 +1,7 @@
+export enum CloudCredentialType {
+  OAUTH2 = 'OAUTH2',
+  ACCESS_KEY = 'ACCESS_KEY',
+  API_TOKEN = 'API_TOKEN',
+  SERVICE_ACCOUNT = 'SERVICE_ACCOUNT',
+  CUSTOM = 'CUSTOM',
+}
