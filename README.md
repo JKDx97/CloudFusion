@@ -407,6 +407,24 @@ npm --prefix apps/web run build
 
 PostgreSQL y Redis deben estar disponibles. Backups y restauraciones se procesan por BullMQ; la interfaz consulta estados periódicamente. La conexión real con Google Drive/OneDrive, OAuth, cuotas y restauración entre proveedores requiere credenciales válidas y cuentas conectadas.
 
+## Fase 6 — credenciales API (base)
+
+La primera entrega de Fase 6 incorpora credenciales revocables para clientes externos:
+
+- Crea y administra tokens desde **Configuración → API y aplicaciones** (`/settings/api-access`).
+- Cada token usa 256 bits aleatorios, tiene permisos seleccionables y puede expirar.
+- La base de datos almacena únicamente el hash SHA-256; el secreto se muestra una vez al crearlo.
+- Los tokens revocados, expirados o pertenecientes a usuarios deshabilitados no se aceptan.
+- La tabla `api_tokens` se instala con la migración `ApiTokens1725000000000`.
+
+| Método | Ruta | Descripción |
+| --- | --- | --- |
+| POST | `/api-tokens` | Crear un token (requiere JWT; devuelve el secreto una sola vez) |
+| GET | `/api-tokens` | Listar los tokens propios, sin secretos ni hashes |
+| DELETE | `/api-tokens/:id` | Revocar un token propio |
+
+Los permisos disponibles son `files:read`, `files:write`, `files:delete`, `webdav`, `s3`, `sync` y `desktop`. La gestión de tokens está lista; los protocolos WebDAV/S3 y el cliente Desktop se habilitarán en entregas posteriores y todavía no deben considerarse disponibles.
+
 ## Fuera del alcance actual
 
 CloudFusion todavía no implementa Dropbox, Box, MEGA, pCloud, P2P, BitTorrent, erasure coding/RAID, cifrado end-to-end de conocimiento cero, montaje local, WebDAV, gateway S3, CDN, Kubernetes ni aplicación móvil.

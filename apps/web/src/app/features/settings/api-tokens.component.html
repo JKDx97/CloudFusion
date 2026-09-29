@@ -1,0 +1,40 @@
+<main class="min-h-screen bg-[#f7f8fc] px-5 py-6 text-slate-900 lg:px-8">
+  <div class="mx-auto max-w-5xl">
+    <a routerLink="/dashboard" class="text-sm font-semibold text-indigo-600">← Volver al explorador</a>
+    <div class="mt-4">
+      <p class="text-sm font-semibold uppercase tracking-[0.18em] text-indigo-600">Configuración</p>
+      <h1 class="mt-2 text-3xl font-semibold tracking-tight text-slate-950">API y aplicaciones</h1>
+      <p class="mt-2 max-w-2xl text-sm leading-6 text-slate-500">Crea credenciales para clientes externos. Usa permisos mínimos y revoca cualquier token que ya no necesites.</p>
+    </div>
+
+    @if (notice()) { <div class="mt-5 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">{{ notice() }}</div> }
+    @if (error()) { <div class="mt-5 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">{{ error() }}</div> }
+
+    @if (oneTimeToken(); as secret) {
+      <section class="mt-6 rounded-2xl border border-amber-300 bg-amber-50 p-5" aria-live="polite">
+        <div class="flex flex-wrap items-start justify-between gap-3">
+          <div><h2 class="font-semibold text-amber-950">Copia tu token ahora</h2><p class="mt-1 text-sm leading-5 text-amber-900">CloudFusion no guarda el secreto y no podrá volver a mostrarlo. Si lo pierdes, revoca este token y crea uno nuevo.</p></div>
+          <button type="button" class="rounded-lg border border-amber-300 px-3 py-2 text-sm font-semibold text-amber-900" (click)="dismissSecret()">Cerrar</button>
+        </div>
+        <div class="mt-4 flex flex-col gap-2 sm:flex-row"><input class="min-w-0 flex-1 rounded-xl border border-amber-300 bg-white px-3 py-3 font-mono text-sm" aria-label="Token mostrado una sola vez" [value]="secret" readonly /><button type="button" class="rounded-xl bg-amber-900 px-4 py-3 text-sm font-semibold text-white" (click)="copyToken()">Copiar token</button></div>
+      </section>
+    }
+
+    <div class="mt-6 grid gap-5 lg:grid-cols-[0.85fr_1.15fr]">
+      <form class="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm" (submit)="$event.preventDefault(); create()">
+        <h2 class="font-semibold text-slate-900">Crear token</h2>
+        <label class="mt-5 block text-xs font-semibold text-slate-500">Nombre identificable<input class="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm" [(ngModel)]="name" name="name" maxlength="80" placeholder="Copia de seguridad WebDAV" /></label>
+        <fieldset class="mt-5"><legend class="text-xs font-semibold text-slate-500">Permisos</legend><div class="mt-2 space-y-2">@for (scope of availableScopes; track scope.value) { <label class="flex cursor-pointer gap-3 rounded-xl border border-slate-100 p-3 hover:bg-slate-50"><input class="mt-1" type="checkbox" [checked]="selectedScopes.includes(scope.value)" (change)="toggleScope(scope.value, $event)" /><span><span class="block text-sm font-semibold text-slate-700">{{ scope.label }}</span><span class="mt-0.5 block text-xs leading-5 text-slate-500">{{ scope.description }}</span><code class="mt-1 block text-[11px] text-slate-400">{{ scope.value }}</code></span></label> }</div></fieldset>
+        <label class="mt-5 block text-xs font-semibold text-slate-500">Expira el (opcional)<input class="mt-2 w-full rounded-xl border border-slate-200 px-3 py-2.5 text-sm" type="date" [(ngModel)]="expirationDate" name="expirationDate" [min]="minExpirationDate" /><span class="mt-1 block font-normal">Sin fecha: el token seguirá activo hasta que lo revoques.</span></label>
+        <button class="mt-5 w-full rounded-xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white hover:bg-slate-700" type="submit">Crear token</button>
+      </form>
+
+      <section class="space-y-3">
+        <div class="flex items-center justify-between"><h2 class="font-semibold text-slate-900">Tokens existentes</h2><button class="text-xs font-semibold text-indigo-600" type="button" (click)="load()">Actualizar</button></div>
+        @if (loading()) { <div class="rounded-2xl border border-slate-200 bg-white p-6 text-sm text-slate-500">Cargando tokens…</div> }
+        @else if (tokens().length === 0) { <div class="rounded-2xl border border-dashed border-slate-300 bg-white p-8 text-center text-sm text-slate-500">Todavía no has creado tokens de acceso.</div> }
+        @else { @for (token of tokens(); track token.id) { <article class="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-sm"><div class="flex flex-wrap items-start justify-between gap-3"><div class="min-w-0"><h3 class="truncate font-semibold text-slate-900">{{ token.name }}</h3><code class="mt-1 block text-xs text-slate-500">{{ token.prefix }}…</code></div><span class="rounded-full px-2.5 py-1 text-[11px] font-bold" [class.bg-emerald-50]="status(token) === 'Activo'" [class.text-emerald-700]="status(token) === 'Activo'" [class.bg-slate-100]="status(token) !== 'Activo'" [class.text-slate-500]="status(token) !== 'Activo'">{{ status(token) }}</span></div><div class="mt-4 flex flex-wrap gap-1.5">@for (scope of token.scopes; track scope) { <span class="rounded-lg bg-indigo-50 px-2 py-1 text-[11px] font-medium text-indigo-700">{{ scope }}</span> }</div><dl class="mt-4 grid grid-cols-2 gap-x-4 gap-y-2 text-xs"><dt class="text-slate-400">Creado</dt><dd class="text-right text-slate-600">{{ formatDate(token.createdAt) }}</dd><dt class="text-slate-400">Último uso</dt><dd class="text-right text-slate-600">{{ formatDate(token.lastUsedAt) }}</dd><dt class="text-slate-400">Expira</dt><dd class="text-right text-slate-600">{{ formatDate(token.expiresAt) }}</dd></dl>@if (!token.revokedAt) { <button class="mt-4 text-xs font-semibold text-rose-600 hover:text-rose-800" type="button" (click)="revoke(token)">Revocar token</button> }</article> } }
+      </section>
+    </div>
+  </div>
+</main>

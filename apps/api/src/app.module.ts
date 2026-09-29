@@ -26,6 +26,8 @@ import { SnapshotsModule } from './snapshots/snapshots.module';
 import { BackupsModule } from './backups/backups.module';
 import { ProtectionModule } from './protection/protection.module';
 import { RealtimeModule } from './realtime/realtime.module';
+import { ApiTokensModule } from './api-tokens/api-tokens.module';
+import { ApiToken } from './api-tokens/entities/api-token.entity';
 
 @Module({
   imports: [
@@ -35,6 +37,7 @@ import { RealtimeModule } from './realtime/realtime.module';
       load: [configuration],
     }),
     RealtimeModule,
+    ApiTokensModule,
     ThrottlerModule.forRoot([{ ttl: 60_000, limit: 60 }]),
     TypeOrmModule.forRootAsync({
       inject: [ConfigService],
@@ -46,7 +49,7 @@ import { RealtimeModule } from './realtime/realtime.module';
         password: config.get<string>('database.password'),
         database: config.get<string>('database.name'),
         autoLoadEntities: true,
-        entities: [User, CloudAccount, TransferJob, StorageRule, AuditLog, VirtualNode, StorageObject, StorageReplica, StoragePolicy],
+        entities: [User, CloudAccount, TransferJob, StorageRule, AuditLog, VirtualNode, StorageObject, StorageReplica, StoragePolicy, ApiToken],
         migrations: [__dirname + '/database/migrations/*{.ts,.js}'],
         synchronize: false,
         migrationsRun: false,
