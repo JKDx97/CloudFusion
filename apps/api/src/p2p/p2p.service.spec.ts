@@ -237,6 +237,45 @@ describe('P2pService transfer coordination', () => {
     )).rejects.toBeInstanceOf(ForbiddenException);
   });
 
+  it('allows only the receiver to advance monotonic byte progress during a transfer', async () => {
+    const ctx = makeService();
+    const transfer = createTransfer(PeerTransferStatus.TRANSFERRING);
+    transfer.bytesTransferred = '8';
+    ctx.transfers.findOne.mockResolvedValue(transfer);
+
+    const result = await ctx.service.updateTransferState(
+      'destination-user', 'destination-device', 'transfer-id',
+      PeerTransferStatus.TRANSFERRING, undefined, '12',
+    );
+
+    expect(result.bytesTransferred).toBe('12');
+    expect(ctx.transfers.save).toHaveBeenCalledWith(expect.objectContaining({ bytesTransferred: '12' }));
+  });
+
+  it('does not allow the source device to report receiver-side byte progress', async () => {
+    const ctx = makeService();
+    ctx.transfers.findOne.mockResolvedValue(createTransfer(PeerTransferStatus.TRANSFERRING));
+
+    await expect(ctx.service.updateTransferState(
+      'source-user', 'source-device', 'transfer-id',
+      PeerTransferStatus.TRANSFERRING, undefined, '8',
+    )).rejects.toBeInstanceOf(ForbiddenException);
+    expect(ctx.transfers.save).not.toHaveBeenCalled();
+  });
+
+  it('rejects transfer progress that moves backwards', async () => {
+    const ctx = makeService();
+    const transfer = createTransfer(PeerTransferStatus.TRANSFERRING);
+    transfer.bytesTransferred = '8';
+    ctx.transfers.findOne.mockResolvedValue(transfer);
+
+    await expect(ctx.service.updateTransferState(
+      'destination-user', 'destination-device', 'transfer-id',
+      PeerTransferStatus.TRANSFERRING, undefined, '7',
+    )).rejects.toBeInstanceOf(ConflictException);
+    expect(ctx.transfers.save).not.toHaveBeenCalled();
+  });
+
   it('does not mark a file complete unless the receiver reports the exact authorized byte count', async () => {
     const ctx = makeService();
     const transfer = createTransfer(PeerTransferStatus.VERIFYING);

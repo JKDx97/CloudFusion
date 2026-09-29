@@ -330,14 +330,22 @@ export class P2pService {
     bytesTransferred?: string,
   ) {
     const transfer = await this.requireParticipant(userId, deviceId, transferId);
-    if (!this.canTransition(transfer.status, nextStatus)) throw new ConflictException('Invalid peer transfer state transition');
+    const isProgressUpdate = transfer.status === PeerTransferStatus.TRANSFERRING && nextStatus === PeerTransferStatus.TRANSFERRING;
+    if (!isProgressUpdate && !this.canTransition(transfer.status, nextStatus)) {
+      throw new ConflictException('Invalid peer transfer state transition');
+    }
     if (
       (nextStatus === PeerTransferStatus.VERIFYING || nextStatus === PeerTransferStatus.COMPLETED) &&
       deviceId !== transfer.destinationDeviceId
     ) throw new ForbiddenException('Only the receiving device may verify transfer completion');
     if (bytesTransferred !== undefined) {
+      if (deviceId !== transfer.destinationDeviceId) {
+        throw new ForbiddenException('Only the receiving device may report verified transfer progress');
+      }
       const bytes = BigInt(bytesTransferred);
-      if (bytes < 0n || bytes > BigInt(transfer.totalBytes)) throw new ConflictException('Transferred byte count is outside the authorized size');
+      if (bytes < BigInt(transfer.bytesTransferred) || bytes > BigInt(transfer.totalBytes)) {
+        throw new ConflictException('Transferred byte count must be monotonic and within the authorized size');
+      }
       transfer.bytesTransferred = bytes.toString();
     }
     if (transport) transfer.transport = transport;
