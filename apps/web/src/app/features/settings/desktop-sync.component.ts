@@ -36,12 +36,19 @@ interface RemoteFolder {
   isRoot: boolean;
 }
 
+interface SyncedNodeStatus {
+  status: string;
+  currentVersionId: string | null;
+}
+
 interface SyncUploadReceipt {
   rootId: string;
   relativePath: string;
   remotePath: string;
   nodeId: string;
   versionId: string;
+  contentHash: string;
+  sizeBytes: string;
   conflict: boolean;
   unchanged: boolean;
   warning?: string | null;
@@ -439,14 +446,19 @@ export class DesktopSyncComponent implements OnInit, OnDestroy {
         apiUrl: this.apiUrl,
         accessToken,
       });
+      let peerNotice = '';
+      if (this.meshEnabled() && this.serveLocalFiles()) {
+        peerNotice = ' Comprobando cuándo termina el guardado cloud para anunciar la copia P2P…';
+        void this.advertiseSyncedCopy(receipt, key);
+      }
       const matchingChanges = this.changes().filter((item) =>
         item.rootId === change.rootId && item.relativePath === change.relativePath && item.operation !== 'deleted',
       );
       for (const item of matchingChanges) await this.invoke<boolean>('acknowledge_sync_change', { id: item.id });
       this.changes.update((items) => items.filter((item) => !matchingChanges.some((done) => done.id === item.id)));
       const detail = receipt.conflict ? ' (copia en conflicto conservada)' : '';
-      this.syncStates.update((states) => ({ ...states, [key]: receipt.warning || `Sincronizado${detail}.` }));
-      this.syncNotice.set(receipt.warning || `Archivo sincronizado: ${receipt.relativePath}${detail}.`);
+      this.syncStates.update((states) => ({ ...states, [key]: receipt.warning || `Sincronizado${detail}.${peerNotice}` }));
+      this.syncNotice.set(receipt.warning || `Archivo sincronizado: ${receipt.relativePath}${detail}.${peerNotice}`);
       return true;
     } catch (error) {
       this.syncStates.update((states) => ({ ...states, [key]: this.nativeError(error, 'No se pudo sincronizar este archivo.') }));
@@ -458,6 +470,42 @@ export class DesktopSyncComponent implements OnInit, OnDestroy {
     if (typeof error === 'string' && error.trim()) return error;
     if (error instanceof Error && error.message) return error.message;
     return fallback;
+  }
+
+  private async advertiseSyncedCopy(receipt: SyncUploadReceipt, statusKey: string): Promise<void> {
+    const retryDelays = [0, 1_000, 2_000, 4_000, 8_000, 15_000];
+    for (const delay of retryDelays) {
+      if (!this.meshEnabled() || !this.serveLocalFiles()) return;
+      if (delay) await new Promise<void>((resolve) => setTimeout(resolve, delay));
+      try {
+        const nodeResponse = await firstValueFrom(this.http.get<ApiResponse<SyncedNodeStatus>>(
+          `${this.apiUrl}/virtual-drive/nodes/${receipt.nodeId}`,
+        ));
+        const node = nodeResponse.data;
+        if (node.currentVersionId !== receipt.versionId) {
+          this.setP2pSyncNotice(statusKey, 'La versión cambió antes de anunciarse; la copia cloud sigue sincronizada.');
+          return;
+        }
+        if (node.status === 'UNAVAILABLE' || node.status === 'ERROR') break;
+        if (node.status !== 'AVAILABLE') continue;
+        await firstValueFrom(this.http.post<ApiResponse<unknown>>(`${this.apiUrl}/p2p/availability`, {
+          nodeId: receipt.nodeId,
+          versionId: receipt.versionId,
+          contentHash: receipt.contentHash,
+          sizeBytes: receipt.sizeBytes,
+        }));
+        this.setP2pSyncNotice(statusKey, 'La copia local verificada está disponible para tus otros dispositivos.');
+        return;
+      } catch {
+        // Provider replication and the API can be briefly busy after an upload; retry within the ticket/lease setup window.
+      }
+    }
+    this.setP2pSyncNotice(statusKey, 'La copia cloud quedó guardada, pero todavía no se pudo anunciar como fuente P2P.');
+  }
+
+  private setP2pSyncNotice(statusKey: string, message: string): void {
+    this.syncStates.update((states) => ({ ...states, [statusKey]: `Sincronizado. ${message}` }));
+    this.syncNotice.set(message);
   }
 
   async updateLocalFileServing(event: Event): Promise<void> {

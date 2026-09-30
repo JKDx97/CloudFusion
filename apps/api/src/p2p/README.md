@@ -31,7 +31,7 @@ The `1734000000000-PeerTransferCoordination` migration creates the availability 
 ## Remaining work
 
 - Resuming a partial P2P transfer is not implemented; a failed receive removes its temporary partial file and a retry starts from byte zero.
-- Local folder watchers currently index and journal changes, but do not yet synchronize those changes bidirectionally with CloudFusion or another device, nor resolve conflicts.
+- Desktop sync folders can now upload local changes into a selected CloudFusion Drive folder, preserve remote conflicts, and advertise the verified local copy for P2P when the device allows serving files. This is local-to-cloud sync plus peer sourcing, not bidirectional peer sync; deletions are intentionally not propagated, and availability advertisements expire.
 - A headless/NAS deployment mode and background service lifecycle are not implemented.
 
 The web fallback is a normal browser download; it does not currently continue into the Desktop-selected P2P destination.

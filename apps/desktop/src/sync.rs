@@ -49,6 +49,8 @@ pub struct SyncUploadReceipt {
     pub remote_path: String,
     pub node_id: String,
     pub version_id: String,
+    pub content_hash: String,
+    pub size_bytes: String,
     pub conflict: bool,
     pub unchanged: bool,
     pub warning: Option<String>,
@@ -87,6 +89,7 @@ struct SyncUploadedNode {
 struct SyncUploadedVersion {
     id: String,
     checksum: String,
+    size: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -770,9 +773,17 @@ pub async fn upload_sync_change(
     let final_checksum = tauri::async_runtime::spawn_blocking(move || hash_file(&verify_path))
         .await
         .map_err(|error| error.to_string())??;
-    if !version.checksum.eq_ignore_ascii_case(&final_checksum) {
+    let final_size = fs::metadata(&file_path)
+        .map_err(|_| "No se pudo verificar el tamaño final del archivo local".to_owned())?
+        .len();
+    if !version.checksum.eq_ignore_ascii_case(&final_checksum) || version.size != final_size {
         return Err("El archivo local cambió durante la subida; el cambio sigue pendiente y se volverá a intentar".to_owned());
     }
+    state
+        .local_file_index
+        .write()
+        .map_err(|_| "El índice local para P2P no está disponible".to_owned())?
+        .insert((final_checksum.clone(), final_size), file_path);
 
     Ok(SyncUploadReceipt {
         root_id,
@@ -780,6 +791,8 @@ pub async fn upload_sync_change(
         remote_path: resolved_remote_path,
         node_id: uploaded.node.id,
         version_id: current_version_id,
+        content_hash: final_checksum,
+        size_bytes: final_size.to_string(),
         conflict: uploaded.conflict,
         unchanged: uploaded.unchanged,
         warning: uploaded.warning,
