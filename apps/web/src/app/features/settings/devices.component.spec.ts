@@ -52,4 +52,40 @@ describe('DevicesComponent', () => {
 
     expect(fixture.nativeElement.textContent).toContain('A1B2C3D4-E5F60718-192A3B4C-5D6E7F80');
   });
+
+  it('updates a device P2P opt-in through its authenticated settings endpoint', async () => {
+    fixture.detectChanges();
+    const device = {
+      id: 'nas-device',
+      name: 'CloudFusion NAS',
+      platform: 'NAS',
+      clientVersion: '0.1.0',
+      p2pEnabled: false,
+      lanDiscoveryEnabled: true,
+      internetP2pEnabled: false,
+      relayAllowed: true,
+      serveLocalFiles: false,
+      storageContributionEnabled: false,
+      lastSeenAt: null,
+      revokedAt: null,
+    };
+    http.expectOne('http://localhost:3000/devices').flush({ data: [device], message: 'ok' });
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    const enableP2p = fixture.nativeElement.querySelector('[aria-label="Activar P2P en CloudFusion NAS"]') as HTMLButtonElement | null;
+    if (!enableP2p) throw new Error('P2P opt-in control was not rendered');
+    enableP2p.click();
+    fixture.detectChanges();
+
+    const update = http.expectOne('http://localhost:3000/devices/nas-device/settings');
+    expect(update.request.method).toBe('PATCH');
+    expect(update.request.body).toEqual({ p2pEnabled: true });
+    update.flush({ data: { ...device, p2pEnabled: true }, message: 'ok' });
+    await fixture.whenStable();
+    fixture.detectChanges();
+
+    expect(fixture.nativeElement.querySelector('[aria-label="Desactivar P2P en CloudFusion NAS"]')).not.toBeNull();
+    expect(fixture.nativeElement.textContent).toContain('P2P: activado');
+  });
 });

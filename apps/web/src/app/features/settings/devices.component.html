@@ -65,6 +65,13 @@
               <p class="mt-1 text-xs text-slate-500">{{ device.clientVersion ? 'CloudFusion ' + device.clientVersion + ' · ' : '' }}Última actividad: {{ device.lastSeenAt ? (device.lastSeenAt | date:'medium') : 'sin actividad registrada' }}</p>
               @if (!device.revokedAt) {
                 <p class="mt-1 text-xs text-slate-500">P2P {{ device.p2pEnabled ? 'activado' : 'desactivado' }} · Aporta almacenamiento {{ device.storageContributionEnabled ? 'activado' : 'desactivado' }}</p>
+                <div class="mt-3 flex flex-wrap gap-2" aria-label="Configuración P2P del dispositivo">
+                  @for (setting of p2pSettings; track setting.key) {
+                    <button type="button" class="rounded-lg border px-3 py-1.5 text-xs font-semibold transition disabled:cursor-wait disabled:opacity-50" [class.border-indigo-200]="device[setting.key]" [class.bg-indigo-50]="device[setting.key]" [class.text-indigo-800]="device[setting.key]" [class.border-slate-200]="!device[setting.key]" [class.bg-white]="!device[setting.key]" [class.text-slate-600]="!device[setting.key]" [disabled]="savingDeviceSettings() !== null" [attr.aria-pressed]="device[setting.key]" [attr.aria-label]="(device[setting.key] ? 'Desactivar ' : 'Activar ') + setting.label + ' en ' + device.name" (click)="toggleP2pSetting(device, setting.key)">
+                      {{ setting.label }}: {{ device[setting.key] ? 'activado' : 'desactivado' }}
+                    </button>
+                  }
+                </div>
               }
             </div>
             @if (!device.revokedAt && device.id !== currentDeviceId) {

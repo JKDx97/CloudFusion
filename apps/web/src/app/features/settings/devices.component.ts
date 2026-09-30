@@ -27,6 +27,13 @@ interface DevicePairingCode {
   expiresAt: string;
 }
 
+type P2pSettingKey = 'p2pEnabled' | 'lanDiscoveryEnabled' | 'internetP2pEnabled' | 'relayAllowed' | 'serveLocalFiles';
+
+interface P2pSetting {
+  key: P2pSettingKey;
+  label: string;
+}
+
 @Component({
   selector: 'app-devices',
   standalone: true,
@@ -45,8 +52,16 @@ export class DevicesComponent implements OnInit, OnDestroy {
   readonly loading = signal(true);
   readonly creatingCode = signal(false);
   readonly revokingDevice = signal<string | null>(null);
+  readonly savingDeviceSettings = signal<string | null>(null);
   readonly error = signal('');
   readonly notice = signal('');
+  readonly p2pSettings: P2pSetting[] = [
+    { key: 'p2pEnabled', label: 'P2P' },
+    { key: 'lanDiscoveryEnabled', label: 'Descubrimiento LAN' },
+    { key: 'internetP2pEnabled', label: 'P2P por Internet' },
+    { key: 'relayAllowed', label: 'Permitir relay' },
+    { key: 'serveLocalFiles', label: 'Servir archivos locales' },
+  ];
 
   ngOnInit(): void {
     void this.loadDevices();
@@ -127,6 +142,25 @@ export class DevicesComponent implements OnInit, OnDestroy {
       this.error.set('No se pudo revocar el dispositivo. Actualiza la lista e inténtalo de nuevo.');
     } finally {
       this.revokingDevice.set(null);
+    }
+  }
+
+  async toggleP2pSetting(device: RegisteredDevice, key: P2pSettingKey): Promise<void> {
+    if (device.revokedAt || this.savingDeviceSettings()) return;
+    this.savingDeviceSettings.set(device.id);
+    this.error.set('');
+    this.notice.set('');
+    try {
+      const response = await firstValueFrom(this.http.patch<ApiResponse<RegisteredDevice>>(
+        `${this.apiUrl}/devices/${device.id}/settings`,
+        { [key]: !device[key] },
+      ));
+      this.devices.update((devices) => devices.map((item) => item.id === device.id ? response.data : item));
+      this.notice.set(`Se actualizó la configuración de red de ${device.name}.`);
+    } catch {
+      this.error.set(`No se pudo actualizar la configuración de ${device.name}. Inténtalo de nuevo.`);
+    } finally {
+      this.savingDeviceSettings.set(null);
     }
   }
 }
