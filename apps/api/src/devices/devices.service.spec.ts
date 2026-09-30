@@ -2,6 +2,7 @@ import { NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { DevicesService } from './devices.service';
 import { DevicePlatform } from './enums/device-platform.enum';
 import { UserDevice } from './entities/user-device.entity';
+import { DevicePairingCode } from './entities/device-pairing-code.entity';
 
 function device(overrides: Partial<UserDevice> = {}): UserDevice {
   return {
@@ -38,6 +39,19 @@ describe('DevicesService', () => {
     createQueryBuilder: jest.Mock;
   };
   let audit: { record: jest.Mock };
+  let pairingCodes: {
+    delete: jest.Mock;
+    create: jest.Mock;
+    save: jest.Mock;
+    createQueryBuilder: jest.Mock;
+  };
+  let pairingQueryBuilder: {
+    update: jest.Mock;
+    set: jest.Mock;
+    where: jest.Mock;
+    returning: jest.Mock;
+    execute: jest.Mock;
+  };
 
   beforeEach(() => {
     repository = {
@@ -47,8 +61,68 @@ describe('DevicesService', () => {
       save: jest.fn(async (value: UserDevice) => value),
       createQueryBuilder: jest.fn(),
     };
+    pairingQueryBuilder = {
+      update: jest.fn().mockReturnThis(),
+      set: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      returning: jest.fn().mockReturnThis(),
+      execute: jest.fn().mockResolvedValue({ raw: [{ id: 'pairing-id', user_id: 'user-id' }] }),
+    };
+    pairingCodes = {
+      delete: jest.fn().mockResolvedValue(undefined),
+      create: jest.fn((value: Partial<DevicePairingCode>) => value),
+      save: jest.fn(async (value: DevicePairingCode) => ({ ...value, id: 'pairing-id' })),
+      createQueryBuilder: jest.fn(() => pairingQueryBuilder),
+    };
     audit = { record: jest.fn().mockResolvedValue(undefined) };
-    service = new DevicesService(repository as never, audit as never);
+    service = new DevicesService(repository as never, pairingCodes as never, audit as never);
+  });
+
+  it('creates a five-minute pairing code and persists only its hash', async () => {
+    const result = await service.createPairingCode('user-id');
+    const saved = pairingCodes.save.mock.calls[0][0] as DevicePairingCode;
+
+    expect(result.code).toMatch(/^[A-F0-9]{8}(-[A-F0-9]{8}){3}$/);
+    expect(result.expiresAt.getTime()).toBeGreaterThan(Date.now());
+    expect(result.expiresAt.getTime()).toBeLessThanOrEqual(Date.now() + 5 * 60_000);
+    expect(saved.codeHash).toMatch(/^[a-f\d]{64}$/);
+    expect(saved.codeHash).not.toContain(result.code.replace(/-/g, ''));
+    expect(pairingCodes.delete).toHaveBeenCalledWith({ expiresAt: expect.anything() });
+  });
+
+  it('consumes a valid pairing code with one conditional database update', async () => {
+    await expect(service.consumePairingCode('A1B2C3D4-E5F60718-192A3B4C-5D6E7F80')).resolves.toBe('user-id');
+
+    expect(pairingQueryBuilder.update).toHaveBeenCalledWith(DevicePairingCode);
+    expect(pairingQueryBuilder.where).toHaveBeenCalledWith(
+      expect.stringContaining('"consumed_at" IS NULL AND "expires_at" > :now'),
+      expect.objectContaining({ codeHash: expect.stringMatching(/^[a-f\d]{64}$/), now: expect.any(Date) }),
+    );
+    expect(pairingQueryBuilder.returning).toHaveBeenCalledWith('*');
+    expect(audit.record).toHaveBeenCalledWith('user-id', 'DEVICE_PAIRING_CODE_CONSUMED', 'DevicePairingCode', 'pairing-id');
+  });
+
+  it('rejects malformed, expired, or already consumed pairing codes without revealing which condition applied', async () => {
+    await expect(service.consumePairingCode('not-a-pair-code')).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(pairingCodes.createQueryBuilder).not.toHaveBeenCalled();
+
+    pairingQueryBuilder.execute.mockResolvedValueOnce({ raw: [] });
+    await expect(service.consumePairingCode('A1B2C3D4-E5F60718-192A3B4C-5D6E7F80'))
+      .rejects.toThrow('Device pairing code is invalid or expired');
+  });
+
+  it('allows at most one concurrent redemption of the same pairing code', async () => {
+    pairingQueryBuilder.execute
+      .mockResolvedValueOnce({ raw: [{ id: 'pairing-id', user_id: 'user-id' }] })
+      .mockResolvedValueOnce({ raw: [] });
+
+    const results = await Promise.allSettled([
+      service.consumePairingCode('A1B2C3D4-E5F60718-192A3B4C-5D6E7F80'),
+      service.consumePairingCode('A1B2C3D4-E5F60718-192A3B4C-5D6E7F80'),
+    ]);
+
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+    expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
   });
 
   it('registers one device identity and returns a sanitized record', async () => {

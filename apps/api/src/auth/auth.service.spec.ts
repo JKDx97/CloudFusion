@@ -157,6 +157,61 @@ describe('AuthService', () => {
     expect(usersService.updateRefreshTokenHash).not.toHaveBeenCalled();
   });
 
+  it('exchanges a one-time pairing code for a device-bound session without creating a user-wide token', async () => {
+    const devicesService = {
+      consumePairingCode: jest.fn().mockResolvedValue('user-id'),
+      registerForAuthentication: jest.fn().mockResolvedValue({ id: 'nas-device-id' }),
+      updateRefreshTokenHash: jest.fn().mockResolvedValue(undefined),
+    };
+    usersService.findByIdWithSecrets.mockResolvedValue({ ...user, status: UserStatus.ACTIVE });
+    const deviceAuthService = new AuthService(
+      usersService as never,
+      jwtService as never,
+      configService as never,
+      devicesService as never,
+    );
+
+    const result = await deviceAuthService.pairDevice({
+      code: 'A1B2C3D4-E5F60718-192A3B4C-5D6E7F80',
+      device: {
+        installationId: '4c1e7d65-0c17-4fac-a692-b48e6a12fb83',
+        name: 'Home NAS',
+        platform: DevicePlatform.NAS,
+      },
+    });
+
+    expect(result.deviceId).toBe('nas-device-id');
+    expect(jwtService.signAsync.mock.calls[0][0]).toMatchObject({ sub: 'user-id', deviceId: 'nas-device-id' });
+    expect(jwtService.signAsync.mock.calls[1][0]).toMatchObject({ sub: 'user-id', deviceId: 'nas-device-id', type: 'refresh' });
+    expect(devicesService.updateRefreshTokenHash).toHaveBeenCalledWith('user-id', 'nas-device-id', expect.any(String));
+    expect(usersService.updateRefreshTokenHash).not.toHaveBeenCalled();
+  });
+
+  it('does not pair a device to a disabled account after consuming its code', async () => {
+    const devicesService = {
+      consumePairingCode: jest.fn().mockResolvedValue('user-id'),
+      registerForAuthentication: jest.fn(),
+    };
+    usersService.findByIdWithSecrets.mockResolvedValue({ ...user, status: UserStatus.DISABLED });
+    const deviceAuthService = new AuthService(
+      usersService as never,
+      jwtService as never,
+      configService as never,
+      devicesService as never,
+    );
+
+    await expect(deviceAuthService.pairDevice({
+      code: 'A1B2C3D4-E5F60718-192A3B4C-5D6E7F80',
+      device: {
+        installationId: '4c1e7d65-0c17-4fac-a692-b48e6a12fb83',
+        name: 'Home NAS',
+        platform: DevicePlatform.NAS,
+      },
+    })).rejects.toBeInstanceOf(UnauthorizedException);
+    expect(devicesService.registerForAuthentication).not.toHaveBeenCalled();
+    expect(jwtService.signAsync).not.toHaveBeenCalled();
+  });
+
   it('refreshes a valid refresh token and rejects an invalid one', async () => {
     const refreshToken = 'refresh-token';
     user.refreshTokenHash = await argon2.hash(refreshToken);

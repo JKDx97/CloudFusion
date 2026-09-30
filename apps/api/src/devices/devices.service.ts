@@ -1,20 +1,70 @@
 import { BadRequestException, ConflictException, Injectable, NotFoundException, UnauthorizedException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { IsNull, Repository } from 'typeorm';
+import { createHash, randomBytes } from 'node:crypto';
+import { IsNull, LessThan, Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
 import { RegisterDeviceDto } from './dto/register-device.dto';
 import { UpdateDeviceSettingsDto } from './dto/update-device-settings.dto';
+import { DevicePairingCode } from './entities/device-pairing-code.entity';
 import { UserDevice } from './entities/user-device.entity';
 import { isMatchingEd25519PeerIdentity } from './peer-identity';
 
 export type PublicDevice = Omit<UserDevice, 'installationId' | 'refreshTokenHash' | 'peerPublicKey'>;
+const DEVICE_PAIRING_CODE_TTL_MS = 5 * 60 * 1000;
 
 @Injectable()
 export class DevicesService {
   constructor(
     @InjectRepository(UserDevice) private readonly devices: Repository<UserDevice>,
+    @InjectRepository(DevicePairingCode) private readonly pairingCodes: Repository<DevicePairingCode>,
     private readonly audit: AuditService,
   ) {}
+
+  async createPairingCode(userId: string): Promise<{ code: string; expiresAt: Date }> {
+    const now = new Date();
+    await this.pairingCodes.delete({ expiresAt: LessThan(now) });
+
+    const rawCode = randomBytes(16).toString('hex').toUpperCase();
+    const expiresAt = new Date(now.getTime() + DEVICE_PAIRING_CODE_TTL_MS);
+    const pairingCode = this.pairingCodes.create({
+      userId,
+      codeHash: this.hashPairingCode(rawCode),
+      expiresAt,
+      consumedAt: null,
+    });
+    const saved = await this.pairingCodes.save(pairingCode);
+    await this.audit.record(userId, 'DEVICE_PAIRING_CODE_CREATED', 'DevicePairingCode', saved.id, { expiresAt });
+
+    return {
+      code: rawCode.match(/.{1,8}/g)!.join('-'),
+      expiresAt,
+    };
+  }
+
+  async consumePairingCode(code: string): Promise<string> {
+    const normalized = code.replace(/-/g, '').toUpperCase();
+    if (!/^[A-F\d]{32}$/.test(normalized)) {
+      throw new UnauthorizedException('Device pairing code is invalid or expired');
+    }
+
+    const now = new Date();
+    const result = await this.pairingCodes.createQueryBuilder()
+      .update(DevicePairingCode)
+      .set({ consumedAt: () => 'CURRENT_TIMESTAMP' })
+      .where('"code_hash" = :codeHash AND "consumed_at" IS NULL AND "expires_at" > :now', {
+        codeHash: this.hashPairingCode(normalized),
+        now,
+      })
+      .returning('*')
+      .execute();
+    const consumed = result.raw?.[0] as { id?: string; user_id?: string } | undefined;
+    if (!consumed?.id || !consumed.user_id) {
+      throw new UnauthorizedException('Device pairing code is invalid or expired');
+    }
+
+    await this.audit.record(consumed.user_id, 'DEVICE_PAIRING_CODE_CONSUMED', 'DevicePairingCode', consumed.id);
+    return consumed.user_id;
+  }
 
   async registerForAuthentication(userId: string, dto: RegisterDeviceDto): Promise<UserDevice> {
     this.validatePeerIdentity(dto);
@@ -161,5 +211,9 @@ export class DevicesService {
     if (hasPeerId && !isMatchingEd25519PeerIdentity(dto.peerId!, dto.peerPublicKey!)) {
       throw new BadRequestException('Peer ID does not match the supplied Ed25519 public key');
     }
+  }
+
+  private hashPairingCode(code: string): string {
+    return createHash('sha256').update(code).digest('hex');
   }
 }

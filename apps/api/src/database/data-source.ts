@@ -21,6 +21,7 @@ import { ApiToken } from '../api-tokens/entities/api-token.entity';
 import { ResourceShare } from '../permissions/entities/resource-share.entity';
 import { StorageTarget } from '../providers/object-storage/entities/storage-target.entity';
 import { UserDevice } from '../devices/entities/user-device.entity';
+import { DevicePairingCode } from '../devices/entities/device-pairing-code.entity';
 import { DeviceFileAvailability } from '../p2p/entities/device-file-availability.entity';
 import { PeerTransferSession } from '../p2p/entities/peer-transfer-session.entity';
 
@@ -31,7 +32,7 @@ export default new DataSource({
   username: process.env.DATABASE_USER ?? 'cloudfusion',
   password: process.env.DATABASE_PASSWORD ?? 'change_me_local',
   database: process.env.DATABASE_NAME ?? 'cloudfusion',
-  entities: [User, CloudAccount, TransferJob, StorageRule, AuditLog, VirtualNode, StorageObject, StorageReplica, StoragePolicy, FileVersion, Snapshot, SnapshotEntry, SnapshotRestoreJob, BackupPolicy, BackupJob, BackupCopy, ProtectionAlert, ApiToken, ResourceShare, StorageTarget, UserDevice, DeviceFileAvailability, PeerTransferSession],
+  entities: [User, CloudAccount, TransferJob, StorageRule, AuditLog, VirtualNode, StorageObject, StorageReplica, StoragePolicy, FileVersion, Snapshot, SnapshotEntry, SnapshotRestoreJob, BackupPolicy, BackupJob, BackupCopy, ProtectionAlert, ApiToken, ResourceShare, StorageTarget, UserDevice, DevicePairingCode, DeviceFileAvailability, PeerTransferSession],
   migrations: [__dirname + '/migrations/*{.ts,.js}'],
   synchronize: false,
 });

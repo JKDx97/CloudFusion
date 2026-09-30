@@ -7,6 +7,7 @@ import { User, UserStatus } from '../users/entities/user.entity';
 import { LoginDto } from './dto/login.dto';
 import { RefreshTokenDto } from './dto/refresh-token.dto';
 import { RegisterDto } from './dto/register.dto';
+import { PairDeviceDto } from './dto/pair-device.dto';
 import { JwtUser } from './types/jwt-user';
 import { DevicesService } from '../devices/devices.service';
 import { RegisterDeviceDto } from '../devices/dto/register-device.dto';
@@ -62,6 +63,25 @@ export class AuthService {
       JSON.stringify({ event: 'auth.login.succeeded', userId: user.id }),
     );
     return { user: this.usersService.toPublicUser(user), ...tokens, ...(device ? { deviceId: device.id } : {}) };
+  }
+
+  async createDevicePairingCode(userId: string): Promise<{ code: string; expiresAt: Date }> {
+    if (!this.devices) throw new UnauthorizedException('Device pairing is unavailable');
+    return this.devices.createPairingCode(userId);
+  }
+
+  async pairDevice(dto: PairDeviceDto): Promise<AuthResponse> {
+    if (!this.devices) throw new UnauthorizedException('Device pairing is unavailable');
+    const userId = await this.devices.consumePairingCode(dto.code);
+    const user = await this.usersService.findByIdWithSecrets(userId);
+    if (!user || user.status !== UserStatus.ACTIVE) {
+      throw new UnauthorizedException('Device pairing code is invalid or expired');
+    }
+
+    const device = await this.registerDevice(userId, dto.device);
+    const tokens = await this.issueTokens(user, device.id);
+    this.logger.log(JSON.stringify({ event: 'auth.device_pairing.completed', userId, deviceId: device.id }));
+    return { user: this.usersService.toPublicUser(user), ...tokens, deviceId: device.id };
   }
 
   async refresh(dto: RefreshTokenDto): Promise<AuthResponse> {
