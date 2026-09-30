@@ -70,6 +70,7 @@ export interface VirtualUploadResult {
 
 export interface SyncUploadResult extends VirtualUploadResult {
   conflict: boolean;
+  unchanged?: boolean;
 }
 
 @Injectable()
@@ -283,9 +284,11 @@ export class VirtualDriveService {
     relativePath: string,
     file: Express.Multer.File,
     expectedVersionId?: string,
+    checksum?: string,
   ): Promise<SyncUploadResult> {
     if (!file) throw new BadRequestException('A file is required');
-    if (!isUUID(rootId) || (expectedVersionId !== undefined && !isUUID(expectedVersionId))) {
+    if (!isUUID(rootId) || (expectedVersionId !== undefined && !isUUID(expectedVersionId)) ||
+      (checksum !== undefined && !/^[a-f\d]{64}$/i.test(checksum))) {
       throw new BadRequestException('Invalid sync destination or version identifier');
     }
     const segments = this.parseSyncRelativePath(relativePath);
@@ -311,6 +314,14 @@ export class VirtualDriveService {
     const existing = await this.nodes.findOne({
       where: { userId, workspaceId: IsNull(), parentId, name, deletedAt: IsNull() },
     });
+    const currentVersion = existing?.type === VirtualNodeType.FILE && existing.currentVersionId
+      ? await this.fileVersions.findOne({
+        where: { id: existing.currentVersionId, virtualNodeId: existing.id },
+      })
+      : null;
+    if (existing?.type === VirtualNodeType.FILE && checksum && currentVersion?.checksum.toLowerCase() === checksum.toLowerCase()) {
+      return this.unchangedSyncFile(userId, existing, currentVersion, false);
+    }
     if (existing?.type === VirtualNodeType.FILE && expectedVersionId && existing.currentVersionId === expectedVersionId) {
       return { ...await this.uploadVersion(userId, existing.id, file), conflict: false };
     }
@@ -318,7 +329,23 @@ export class VirtualDriveService {
     let conflict = false;
     if (existing) {
       conflict = true;
-      file.originalname = await this.availableConflictName(userId, parentId, name);
+      if (checksum) {
+        for (let attempt = 0; attempt < 10; attempt += 1) {
+          const candidate = this.formatConflictName(name, checksum.slice(0, 12), attempt);
+          const conflictNode = await this.nodes.findOne({
+            where: { userId, workspaceId: IsNull(), parentId, name: candidate, deletedAt: IsNull() },
+          });
+          if (!conflictNode) break;
+          if (conflictNode.type !== VirtualNodeType.FILE || !conflictNode.currentVersionId) continue;
+          const conflictVersion = await this.fileVersions.findOne({
+            where: { id: conflictNode.currentVersionId, virtualNodeId: conflictNode.id },
+          });
+          if (conflictVersion?.checksum.toLowerCase() === checksum.toLowerCase()) {
+            return this.unchangedSyncFile(userId, conflictNode, conflictVersion, true);
+          }
+        }
+      }
+      file.originalname = await this.availableConflictName(userId, parentId, name, checksum);
     } else {
       file.originalname = name;
     }
@@ -909,14 +936,42 @@ export class VirtualDriveService {
     return segments;
   }
 
-  private async availableConflictName(userId: string, parentId: string, name: string): Promise<string> {
+  private async unchangedSyncFile(
+    actorUserId: string,
+    node: VirtualNode,
+    version: FileVersion,
+    conflict: boolean,
+  ): Promise<SyncUploadResult> {
+    const replicas = await this.replicas.count({ where: { storageObjectId: version.storageObjectId } });
+    await this.audit.record(actorUserId, 'VIRTUAL_SYNC_UNCHANGED', 'VirtualNode', node.id, { versionId: version.id, conflict });
+    return {
+      node: this.toResponse(node),
+      queued: false,
+      replicas,
+      version: {
+        id: version.id,
+        versionNumber: version.versionNumber,
+        checksum: version.checksum,
+        size: Number(version.size),
+        createdAt: version.createdAt,
+      },
+      conflict,
+      unchanged: true,
+    };
+  }
+
+  private formatConflictName(name: string, tag: string, attempt: number): string {
     const extensionIndex = name.lastIndexOf('.');
     const stem = extensionIndex > 0 ? name.slice(0, extensionIndex) : name;
     const extension = extensionIndex > 0 ? name.slice(extensionIndex) : '';
-    const stamp = new Date().toISOString().replace(/[-:TZ.]/g, '').slice(0, 17);
+    const suffix = attempt ? `-${attempt}` : '';
+    return `${stem} (conflicto ${tag}${suffix})${extension}`;
+  }
+
+  private async availableConflictName(userId: string, parentId: string, name: string, checksum?: string): Promise<string> {
+    const tag = checksum?.slice(0, 12).toLowerCase() ?? new Date().toISOString().replace(/[-:TZ.]/g, '').slice(0, 17);
     for (let attempt = 0; attempt < 10; attempt += 1) {
-      const suffix = attempt ? `-${attempt}` : '';
-      const candidate = `${stem} (conflicto ${stamp}${suffix})${extension}`;
+      const candidate = this.formatConflictName(name, tag, attempt);
       const existing = await this.nodes.findOne({
         where: { userId, workspaceId: IsNull(), parentId, name: candidate, deletedAt: IsNull() },
       });

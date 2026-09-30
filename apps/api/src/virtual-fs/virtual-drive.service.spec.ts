@@ -41,7 +41,7 @@ function fixture(permissions?: { requireRead: jest.Mock; requireWrite: jest.Mock
     delete: jest.fn(),
   };
   const objects = { findOne: jest.fn(), save: jest.fn(), create: jest.fn(), createQueryBuilder: jest.fn(), delete: jest.fn(), count: jest.fn() };
-  const fileVersions = { find: jest.fn(), save: jest.fn(), create: jest.fn(), delete: jest.fn(), update: jest.fn(), count: jest.fn() };
+  const fileVersions = { find: jest.fn(), findOne: jest.fn(), save: jest.fn(), create: jest.fn(), delete: jest.fn(), update: jest.fn(), count: jest.fn() };
   const snapshotEntries = { count: jest.fn().mockResolvedValue(0) };
   const replicas = { findOne: jest.fn(), find: jest.fn(), save: jest.fn(), create: jest.fn(), count: jest.fn() };
   const policies = { findOne: jest.fn(), save: jest.fn(), create: jest.fn((value: unknown) => value) };
@@ -154,6 +154,73 @@ describe('VirtualDriveService', () => {
 
     expect(upload).toHaveBeenCalledWith('owner-id', existing.id, expect.any(Object));
     expect(result).toEqual(expect.objectContaining({ conflict: false, node: { id: existing.id } }));
+  });
+
+  it('treats an already received matching checksum as an idempotent sync retry', async () => {
+    const root = node({ id: '00000000-0000-4000-8000-000000000021' });
+    const existing = node({
+      id: '00000000-0000-4000-8000-000000000022', name: 'report.txt', type: VirtualNodeType.FILE,
+      parentId: root.id, isRoot: false, currentVersionId: '00000000-0000-4000-8000-000000000023',
+    });
+    const checksum = 'a'.repeat(64);
+    const fixtureData = fixture();
+    fixtureData.nodes.findOne.mockResolvedValueOnce(root).mockResolvedValueOnce(existing);
+    fixtureData.fileVersions.findOne.mockResolvedValue({
+      id: existing.currentVersionId,
+      virtualNodeId: existing.id,
+      storageObjectId: 'object-id',
+      versionNumber: 2,
+      size: '7',
+      checksum,
+      createdAt: new Date('2026-09-30T10:00:00Z'),
+    });
+    fixtureData.replicas.count.mockResolvedValue(1);
+    const uploadVersion = jest.spyOn(fixtureData.service, 'uploadVersion');
+
+    const result = await fixtureData.service.uploadSyncFile(
+      'owner-id', root.id, 'report.txt', { originalname: 'report.txt' } as Express.Multer.File,
+      undefined, checksum,
+    );
+
+    expect(result).toEqual(expect.objectContaining({ conflict: false, unchanged: true, replicas: 1, version: expect.objectContaining({ id: existing.currentVersionId }) }));
+    expect(uploadVersion).not.toHaveBeenCalled();
+  });
+
+  it('reuses the deterministic conflict copy when a sync retry follows a lost confirmation', async () => {
+    const root = node({ id: '00000000-0000-4000-8000-000000000031' });
+    const original = node({
+      id: '00000000-0000-4000-8000-000000000032', name: 'report.txt', type: VirtualNodeType.FILE,
+      parentId: root.id, isRoot: false, currentVersionId: '00000000-0000-4000-8000-000000000033',
+    });
+    const checksum = 'b'.repeat(64);
+    const conflictCopy = node({
+      id: '00000000-0000-4000-8000-000000000034', name: `report (conflicto ${checksum.slice(0, 12)}).txt`,
+      type: VirtualNodeType.FILE, parentId: root.id, isRoot: false,
+      currentVersionId: '00000000-0000-4000-8000-000000000035',
+    });
+    const fixtureData = fixture();
+    fixtureData.nodes.findOne.mockResolvedValueOnce(root).mockResolvedValueOnce(original).mockResolvedValueOnce(conflictCopy);
+    fixtureData.fileVersions.findOne
+      .mockResolvedValueOnce({ checksum: 'c'.repeat(64) })
+      .mockResolvedValueOnce({
+        id: conflictCopy.currentVersionId,
+        virtualNodeId: conflictCopy.id,
+        storageObjectId: 'conflict-object',
+        versionNumber: 1,
+        size: '7',
+        checksum,
+        createdAt: new Date('2026-09-30T10:00:00Z'),
+      });
+    fixtureData.replicas.count.mockResolvedValue(1);
+    const upload = jest.spyOn(fixtureData.service, 'upload');
+
+    const result = await fixtureData.service.uploadSyncFile(
+      'owner-id', root.id, 'report.txt', { originalname: 'report.txt' } as Express.Multer.File,
+      undefined, checksum,
+    );
+
+    expect(result).toEqual(expect.objectContaining({ conflict: true, unchanged: true, node: expect.objectContaining({ id: conflictCopy.id }) }));
+    expect(upload).not.toHaveBeenCalled();
   });
 
   it('keeps both copies when the remote file changed since the local sync base', async () => {

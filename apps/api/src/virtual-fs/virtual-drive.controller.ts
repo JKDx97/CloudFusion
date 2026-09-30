@@ -1,9 +1,11 @@
 import {
   Body,
+  BadRequestException,
   Controller,
   Delete,
   Get,
   Param,
+  PayloadTooLargeException,
   Patch,
   Post,
   Query,
@@ -14,11 +16,14 @@ import {
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { ApiBearerAuth, ApiBody, ApiConsumes, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiBody, ApiConsumes, ApiHeader, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { diskStorage } from 'multer';
-import { mkdirSync } from 'node:fs';
+import { createWriteStream, mkdirSync } from 'node:fs';
+import { unlink } from 'node:fs/promises';
 import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
+import { Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import type { Response } from 'express';
 import { AccessTokenGuard } from '../auth/guards/access-token.guard';
 import type { AuthenticatedRequest } from '../auth/types/authenticated-request';
@@ -123,17 +128,69 @@ export class VirtualDriveController {
 
   @Post('sync-upload')
   @ApiOperation({ summary: 'Sync a Desktop file path into the personal virtual drive, preserving changed remote copies as conflicts' })
-  @ApiConsumes('multipart/form-data')
-  @ApiBody({ schema: { type: 'object', required: ['rootId', 'relativePath', 'file'], properties: { rootId: { type: 'string', format: 'uuid' }, relativePath: { type: 'string' }, expectedVersionId: { type: 'string', format: 'uuid' }, file: { type: 'string', format: 'binary' } } } })
-  @UseInterceptors(FileInterceptor('file', { storage: diskStorage({ destination: uploadDirectory, filename: (_request, file, callback) => callback(null, `${Date.now()}-${randomBytes(8).toString('hex')}-${file.originalname}`) }), limits: { fileSize: Number(process.env.CLOUD_UPLOAD_MAX_BYTES ?? 52_428_800) } }))
-  syncUpload(
-    @Req() request: AuthenticatedRequest,
-    @UploadedFile() file: Express.Multer.File,
-    @Body('rootId') rootId: string,
-    @Body('relativePath') relativePath: string,
-    @Body('expectedVersionId') expectedVersionId?: string,
-  ) {
-    return this.service.uploadSyncFile(request.user.sub, rootId, relativePath, file, expectedVersionId);
+  @ApiConsumes('application/octet-stream')
+  @ApiHeader({ name: 'x-cloudfusion-sync-root', required: true, description: 'CloudFusion Drive destination folder UUID' })
+  @ApiHeader({ name: 'x-cloudfusion-sync-path', required: true, description: 'URL-safe base64 encoded relative path' })
+  @ApiHeader({ name: 'x-cloudfusion-sync-checksum', required: true, description: 'SHA-256 checksum of the file' })
+  @ApiHeader({ name: 'x-cloudfusion-sync-version', required: false, description: 'Expected current version UUID' })
+  @ApiBody({ schema: { type: 'string', format: 'binary' } })
+  async syncUpload(@Req() request: AuthenticatedRequest) {
+    if (!request.is('application/octet-stream')) {
+      throw new BadRequestException('Sync uploads must use application/octet-stream');
+    }
+    const header = (name: string): string | undefined => {
+      const value = request.headers[name];
+      return typeof value === 'string' ? value : undefined;
+    };
+    const rootId = header('x-cloudfusion-sync-root');
+    const encodedPath = header('x-cloudfusion-sync-path');
+    const checksum = header('x-cloudfusion-sync-checksum');
+    const expectedVersionId = header('x-cloudfusion-sync-version');
+    if (!rootId || !encodedPath || !checksum) {
+      throw new BadRequestException('Missing sync upload headers');
+    }
+    const decodedPath = Buffer.from(encodedPath, 'base64url');
+    const relativePath = decodedPath.toString('utf8');
+    if (decodedPath.toString('base64url') !== encodedPath || Buffer.from(relativePath, 'utf8').compare(decodedPath) !== 0) {
+      throw new BadRequestException('Invalid sync upload path encoding');
+    }
+    const originalname = relativePath.split('/').pop();
+    if (!originalname) throw new BadRequestException('Invalid sync upload filename');
+
+    const configuredMaxBytes = Number(process.env.CLOUD_UPLOAD_MAX_BYTES ?? 52_428_800);
+    const maxBytes = Number.isSafeInteger(configuredMaxBytes) && configuredMaxBytes > 0
+      ? configuredMaxBytes
+      : 52_428_800;
+    const contentLength = request.headers['content-length'];
+    if (typeof contentLength === 'string' && (!/^\d+$/.test(contentLength) || Number(contentLength) > maxBytes)) {
+      throw new PayloadTooLargeException('File exceeds the configured upload size limit');
+    }
+    const filename = `sync-${Date.now()}-${randomBytes(12).toString('hex')}`;
+    const tempPath = join(uploadDirectory, filename);
+    let size = 0;
+    const limiter = new Transform({
+      transform(chunk: Buffer, _encoding, callback) {
+        size += chunk.length;
+        if (size > maxBytes) callback(new PayloadTooLargeException('File exceeds the configured upload size limit'));
+        else callback(null, chunk);
+      },
+    });
+    try {
+      await pipeline(request, limiter, createWriteStream(tempPath, { flags: 'wx' }));
+      const file = {
+        fieldname: 'file',
+        originalname,
+        encoding: '7bit',
+        mimetype: 'application/octet-stream',
+        destination: uploadDirectory,
+        filename,
+        path: tempPath,
+        size,
+      } as Express.Multer.File;
+      return await this.service.uploadSyncFile(request.user.sub, rootId, relativePath, file, expectedVersionId, checksum);
+    } finally {
+      await unlink(tempPath).catch(() => undefined);
+    }
   }
 
   @Patch('nodes/:id')
