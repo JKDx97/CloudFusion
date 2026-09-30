@@ -11,22 +11,26 @@ use std::{
 };
 use uuid::Uuid;
 
+mod sync;
+
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
-const MAX_CONFIG_BYTES: u64 = 32 * 1024;
+const MAX_CONFIG_BYTES: u64 = 128 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct NodeConfig {
-    api_url: String,
-    installation_id: String,
-    name: String,
-    peer_id: String,
-    peer_public_key: String,
-    peer_private_key: String,
+pub(crate) struct NodeConfig {
+    pub(crate) api_url: String,
+    pub(crate) installation_id: String,
+    pub(crate) name: String,
+    pub(crate) peer_id: String,
+    pub(crate) peer_public_key: String,
+    pub(crate) peer_private_key: String,
     #[serde(default)]
-    device_id: Option<String>,
+    pub(crate) device_id: Option<String>,
     #[serde(default)]
-    refresh_token: Option<String>,
+    pub(crate) refresh_token: Option<String>,
+    #[serde(default)]
+    pub(crate) sync_roots: Vec<sync::NodeSyncRoot>,
 }
 
 #[derive(Serialize)]
@@ -55,10 +59,10 @@ struct RefreshRequest<'a> {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct AuthSession {
-    access_token: String,
-    refresh_token: String,
-    device_id: String,
+pub(crate) struct AuthSession {
+    pub(crate) access_token: String,
+    pub(crate) refresh_token: String,
+    pub(crate) device_id: String,
 }
 
 #[derive(Deserialize)]
@@ -114,6 +118,11 @@ async fn run() -> Result<(), String> {
             ensure_no_arguments(args)?;
             logout().await
         }
+        "sync" => sync::run_command(args).await,
+        "start" => {
+            ensure_no_arguments(args)?;
+            sync::run_daemon().await
+        }
         "--help" | "-h" | "help" => {
             println!("{}", usage());
             Ok(())
@@ -123,7 +132,7 @@ async fn run() -> Result<(), String> {
 }
 
 fn usage() -> String {
-    "Usage:\n  cloudfusion-node login --api <https://cloudfusion.example/api>\n  cloudfusion-node status\n  cloudfusion-node logout\n\nPair the node with a short-lived code created from CloudFusion > Dispositivos.\nThe continuous NAS sync/P2P service is not enabled by this initial CLI release.".to_owned()
+    "Usage:\n  cloudfusion-node login --api <https://cloudfusion.example/api>\n  cloudfusion-node status\n  cloudfusion-node sync add --path <local-folder> --remote-node-id <folder-uuid>\n  cloudfusion-node sync list\n  cloudfusion-node sync remove --root-id <root-uuid>\n  cloudfusion-node start\n  cloudfusion-node logout\n\nPair the node with a short-lived code created from CloudFusion > Dispositivos.\n`start` runs background CloudFusion Drive synchronization until interrupted; P2P serving is a separate opt-in and follow-up milestone.".to_owned()
 }
 
 fn parse_api_argument(mut args: impl Iterator<Item = String>) -> Result<String, String> {
@@ -277,7 +286,7 @@ async fn status() -> Result<(), String> {
         "Storage contribution: {}",
         device.storage_contribution_enabled
     );
-    println!("Continuous sync/P2P daemon: not yet available in this CLI build");
+    println!("Configured sync roots: {}", config.sync_roots.len());
     Ok(())
 }
 
@@ -302,7 +311,10 @@ async fn logout() -> Result<(), String> {
     Ok(())
 }
 
-async fn refresh_session(client: &Client, config: &mut NodeConfig) -> Result<AuthSession, String> {
+pub(crate) async fn refresh_session(
+    client: &Client,
+    config: &mut NodeConfig,
+) -> Result<AuthSession, String> {
     let refresh_token = config
         .refresh_token
         .as_deref()
@@ -336,10 +348,10 @@ fn validate_session(session: &AuthSession) -> Result<(), String> {
     Ok(())
 }
 
-fn build_client() -> Result<Client, String> {
+pub(crate) fn build_client() -> Result<Client, String> {
     Client::builder()
         .connect_timeout(Duration::from_secs(10))
-        .timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(600))
         .redirect(reqwest::redirect::Policy::none())
         .user_agent(format!("cloudfusion-node/{CLIENT_VERSION}"))
         .build()
@@ -382,7 +394,7 @@ async fn post_authorized_json<T: Serialize + ?Sized, R: for<'de> Deserialize<'de
     parse_response(response).await
 }
 
-async fn get_json<R: for<'de> Deserialize<'de>>(
+pub(crate) async fn get_json<R: for<'de> Deserialize<'de>>(
     client: &Client,
     api_url: &str,
     path: &str,
@@ -465,10 +477,11 @@ fn new_config(api_url: &str) -> Result<NodeConfig, String> {
         ),
         device_id: None,
         refresh_token: None,
+        sync_roots: Vec::new(),
     })
 }
 
-fn load_config() -> Result<NodeConfig, String> {
+pub(crate) fn load_config() -> Result<NodeConfig, String> {
     load_config_from(&config_path()?)
 }
 
@@ -498,7 +511,7 @@ fn load_config_from(path: &Path) -> Result<NodeConfig, String> {
     serde_json::from_slice(&bytes).map_err(|_| "The node credential file is invalid".to_owned())
 }
 
-fn save_config(config: &NodeConfig) -> Result<(), String> {
+pub(crate) fn save_config(config: &NodeConfig) -> Result<(), String> {
     let path = config_path()?;
     save_config_to(
         &path,
@@ -569,7 +582,7 @@ fn save_config_to(path: &Path, config: &NodeConfig, secure_parent: bool) -> Resu
     Ok(())
 }
 
-fn config_path() -> Result<PathBuf, String> {
+pub(crate) fn config_path() -> Result<PathBuf, String> {
     if let Some(path) = env::var_os("CLOUDFUSION_NODE_CONFIG") {
         return Ok(PathBuf::from(path));
     }
@@ -631,6 +644,7 @@ mod tests {
             peer_private_key: "private-secret".to_owned(),
             device_id: Some("device-id".to_owned()),
             refresh_token: Some("initial-token".to_owned()),
+            sync_roots: Vec::new(),
         };
         save_config_to(&path, &config, true).unwrap();
         assert_eq!(

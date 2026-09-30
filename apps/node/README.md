@@ -1,6 +1,6 @@
 # CloudFusion Node (headless)
 
-The first headless CLI milestone pairs a NAS/Linux installation to a CloudFusion account without collecting the account password. It creates one stable Ed25519 libp2p identity per installation and redeems a short-lived, one-use pairing code.
+The headless CLI pairs a NAS or other always-on computer to CloudFusion without collecting the account password. It creates one stable Ed25519 libp2p identity per installation and redeems a short-lived, one-use pairing code. It can also continuously synchronize configured local folders with **CloudFusion Drive**.
 
 ## Pair and inspect
 
@@ -15,10 +15,24 @@ The first headless CLI milestone pairs a NAS/Linux installation to a CloudFusion
 4. Enter the code when prompted. It is not included in shell history or printed by the CLI. Pairing codes expire after five minutes and can be used once.
 5. Check registration with `cloudfusion-node status`. Revoke the node from the CloudFusion device-management page or run `cloudfusion-node logout`.
 
+## Configure and run folder sync
+
+Create or choose a folder in CloudFusion Drive and copy its folder UUID. On the node, add the local folder:
+
+```sh
+cloudfusion-node sync add --path /srv/cloudfusion --remote-node-id <folder-uuid>
+cloudfusion-node sync list
+cloudfusion-node start
+```
+
+`start` runs an initial sync, then checks for changes about every 30 seconds until Ctrl+C. Local additions and edits are uploaded; remote versions are downloaded after their size and SHA-256 are verified. Concurrent edits are preserved as conflict copies. Symbolic links and unsafe paths are skipped or rejected. File deletions are deliberately not propagated yet, so removing a configured root does not delete its local contents or cloud files. Run `cloudfusion-node sync remove --root-id <root-uuid>` to unlink a local root.
+
+The initial service uses the authenticated CloudFusion API and existing cloud replication queue; it does not yet transfer file data directly between peers. LAN/Internet P2P serving, relay transport, and Linux/NAS release packaging remain follow-up work. Device P2P settings default to disabled and must remain opt-in.
+
 Use `http://localhost:3000` only for a local development API. Remote API addresses must use HTTPS. Do not expose the API pairing code to anyone else.
 
 ## Credential storage
 
 The CLI stores the rotating device refresh token and Ed25519 private identity in `~/.config/cloudfusion-node/node.json` (or `$XDG_CONFIG_HOME/cloudfusion-node/node.json`) on Linux, and `%APPDATA%\CloudFusion\node.json` on Windows. On Unix the default configuration directory is restricted to mode `0700` and the credential file to `0600`; symlink credential files are rejected, and files with broader permissions cannot be used. If `CLOUDFUSION_NODE_CONFIG` overrides the location, the file remains `0600` but the operator is responsible for protecting its parent directory. The file is never intended for the repository. Set `CLOUDFUSION_NODE_CONFIG` to use a separate credential file for another node identity.
 
-This milestone intentionally provides pairing, status, and logout only. It does not yet claim to run continuous folder synchronization, serve P2P file chunks, or act as a relay. Those commands will be enabled after the headless service reuses the Desktop's ticket checks, verified-file index, and `/cloudfusion/file-chunk/1` protocol.
+The separate `sync-manifest.json` stores only local/remote relative paths and version/checksum metadata alongside the credential file; on Unix it is restricted to owner-only permissions. Do not place the node configuration directory in a shared location. The service never logs access/refresh tokens or private keys.

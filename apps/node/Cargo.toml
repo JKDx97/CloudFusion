@@ -1,15 +1,18 @@
 [package]
 name = "cloudfusion-node"
 version = "0.1.0"
-description = "Headless CloudFusion device pairing and management CLI"
+description = "Headless CloudFusion NAS synchronization and device CLI"
 edition = "2021"
 rust-version = "1.88"
 
 [dependencies]
 base64 = "0.22"
+futures = "0.3"
 libp2p = { version = "0.57.0", default-features = false, features = ["ed25519"] }
-reqwest = { version = "0.13.5", features = ["json"] }
+reqwest = { version = "0.13.5", features = ["json", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+sha2 = "0.10.9"
+tokio = { version = "1", features = ["fs", "io-util", "macros", "rt-multi-thread", "signal", "time"] }
+tokio-util = { version = "0.7", features = ["io"] }
 uuid = { version = "1", features = ["v4", "serde"] }

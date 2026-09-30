@@ -32,6 +32,6 @@ The `1734000000000-PeerTransferCoordination` migration creates the availability 
 ## Remaining work
 
 - Desktop sync folders can now upload local changes into a selected CloudFusion Drive folder, preserve remote conflicts, and advertise the verified local copy for P2P when the device allows serving files. This is local-to-cloud sync plus peer sourcing, not bidirectional peer sync; deletions are intentionally not propagated. Desktop renews active availability leases while running and withdraws them when a copy changes or serving is disabled; offline leases expire server-side.
-- A headless/NAS deployment mode and background service lifecycle are not implemented.
+- The headless/NAS CLI now supports pairing and background CloudFusion Drive folder synchronization. Its libp2p serving/requester lifecycle, LAN discovery, relay participation, and device-to-device transfers are still pending; the Desktop implementation remains the only active P2P data plane.
 
 The web fallback is a normal browser download; it does not currently continue into the Desktop-selected P2P destination.
