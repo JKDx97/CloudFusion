@@ -1,8 +1,10 @@
 # CloudFusion Desktop
 
-The Tauri desktop shell reuses the Angular client in `apps/web`. It gives each installation a stable identity in the operating system credential store, registers that identity during login/registration, stores the rotating refresh token in Windows Credential Manager, and watches user-selected local folders.
+The Tauri desktop shell reuses the Angular client in `apps/web`. It gives each installation a stable identity in the operating system credential store, registers that identity during login/registration, stores the rotating refresh token in Windows Credential Manager, and watches user-selected local folders. Folder changes are indexed and journaled for now; the watcher is not yet a bidirectional sync engine.
 
-The desktop can discover approved LAN devices and transfer authorized file chunks directly between trusted peers. The API's one-use tickets and live permission checks remain in force. Local folder changes are currently indexed and journaled; automatic bidirectional sync and conflict recovery are still future milestones.
+The desktop can discover approved devices, establish LAN/direct-P2P/relay routes, and transfer authorized file blocks between trusted peers. The API's one-use tickets and live permission checks remain in force. Transfers use bounded 256 KiB blocks, verify the complete SHA-256, and atomically install only verified files. The Drive action tries available authorized peers and falls back to a permission-checked browser download from CloudFusion.
+
+P2P resume, automatic bidirectional folder synchronization, conflict recovery, and a headless/NAS service are still future milestones. Failed P2P downloads discard their temporary partial file and retry from the beginning.
 
 ## Run on Windows
 
