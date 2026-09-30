@@ -6,7 +6,9 @@ use libp2p::{
     multiaddr::Protocol,
     noise, relay,
     request_response::{self, Message, OutboundRequestId, ProtocolSupport},
-    swarm::{NetworkBehaviour, StreamProtocol, SwarmEvent},
+    swarm::{
+        behaviour::toggle::Toggle, ConnectionId, NetworkBehaviour, StreamProtocol, SwarmEvent,
+    },
     yamux, Multiaddr, PeerId, SwarmBuilder,
 };
 use serde::{Deserialize, Serialize};
@@ -92,7 +94,7 @@ struct SourceTransfer {
 #[derive(NetworkBehaviour)]
 #[behaviour(to_swarm = "MeshEvent")]
 struct MeshBehaviour {
-    mdns: mdns::tokio::Behaviour,
+    mdns: Toggle<mdns::tokio::Behaviour>,
     transfer: request_response::cbor::Behaviour<ChunkRequest, ChunkResponse>,
     relay_client: relay::client::Behaviour,
     identify: identify::Behaviour,
@@ -146,6 +148,7 @@ pub struct MeshManager {
     local_file_index: Arc<RwLock<super::sync::LocalFileIndex>>,
     api_credentials: Arc<RwLock<Option<MeshApiCredentials>>>,
     command_sender: Arc<Mutex<Option<mpsc::Sender<MeshCommand>>>>,
+    peer_transfer_paths: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl MeshManager {
@@ -157,6 +160,7 @@ impl MeshManager {
             local_file_index,
             api_credentials: Arc::new(RwLock::new(None)),
             command_sender: Arc::new(Mutex::new(None)),
+            peer_transfer_paths: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -183,6 +187,14 @@ impl MeshManager {
         response_rx
             .await
             .map_err(|_| "The P2P peer did not return a response".to_owned())?
+    }
+
+    pub(crate) fn transfer_path_for_peer(&self, peer_id: &PeerId) -> String {
+        self.peer_transfer_paths
+            .read()
+            .ok()
+            .and_then(|paths| paths.get(&peer_id.to_string()).cloned())
+            .unwrap_or_else(|| "P2P_DIRECT".to_owned())
     }
 }
 
@@ -245,7 +257,15 @@ pub fn start_lan_mesh(
     app: AppHandle,
     manager: State<'_, MeshManager>,
     identity: State<'_, super::device::DeviceIdentity>,
+    lan_discovery_enabled: bool,
+    internet_p2p_enabled: bool,
+    relay_allowed: bool,
 ) -> Result<(), String> {
+    if !lan_discovery_enabled && !internet_p2p_enabled {
+        return Err(
+            "Enable LAN discovery or Internet P2P before starting the device mesh".to_owned(),
+        );
+    }
     let keypair = identity.peer_keypair()?;
     if manager
         .running
@@ -270,6 +290,7 @@ pub fn start_lan_mesh(
     let local_file_index = Arc::clone(&manager.local_file_index);
     let api_credentials = Arc::clone(&manager.api_credentials);
     let command_sender = Arc::clone(&manager.command_sender);
+    let peer_transfer_paths = Arc::clone(&manager.peer_transfer_paths);
 
     tauri::async_runtime::spawn(async move {
         if let Err(error) = run_lan_mesh(
@@ -279,6 +300,10 @@ pub fn start_lan_mesh(
             local_file_index,
             api_credentials,
             command_sender,
+            peer_transfer_paths,
+            lan_discovery_enabled,
+            internet_p2p_enabled,
+            relay_allowed,
             command_rx,
             stop_rx,
         )
@@ -293,7 +318,7 @@ pub fn start_lan_mesh(
 }
 
 #[tauri::command]
-pub fn stop_lan_mesh(manager: State<'_, MeshManager>) -> Result<(), String> {
+pub async fn stop_lan_mesh(manager: State<'_, MeshManager>) -> Result<(), String> {
     if let Some(stop) = manager
         .stop_signal
         .lock()
@@ -301,6 +326,15 @@ pub fn stop_lan_mesh(manager: State<'_, MeshManager>) -> Result<(), String> {
         .as_ref()
     {
         let _ = stop.send(true);
+    }
+    for _ in 0..100 {
+        if !manager.running.load(Ordering::Acquire) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    if manager.running.load(Ordering::Acquire) {
+        return Err("The device mesh did not stop in time".to_owned());
     }
     *manager
         .api_credentials
@@ -316,14 +350,28 @@ async fn run_lan_mesh(
     local_file_index: Arc<RwLock<super::sync::LocalFileIndex>>,
     api_credentials: Arc<RwLock<Option<MeshApiCredentials>>>,
     command_sender: Arc<Mutex<Option<mpsc::Sender<MeshCommand>>>>,
+    peer_transfer_paths: Arc<RwLock<HashMap<String, String>>>,
+    lan_discovery_enabled: bool,
+    internet_p2p_enabled: bool,
+    relay_allowed: bool,
     mut command_rx: mpsc::Receiver<MeshCommand>,
     mut stop_rx: watch::Receiver<bool>,
 ) -> Result<(), String> {
     let local_peer_id = keypair.public().to_peer_id();
-    let relay_address = configured_relay_address()?;
+    let relay_address = if internet_p2p_enabled && relay_allowed {
+        configured_relay_address()?
+    } else {
+        None
+    };
     let relay_peer_id = relay_address.as_ref().and_then(relay_peer_id);
-    let mdns = mdns::tokio::Behaviour::new(Default::default(), local_peer_id)
-        .map_err(|error| error.to_string())?;
+    let mdns = if lan_discovery_enabled {
+        Some(
+            mdns::tokio::Behaviour::new(Default::default(), local_peer_id)
+                .map_err(|error| error.to_string())?,
+        )
+    } else {
+        None
+    };
     let transfer = request_response::cbor::Behaviour::new(
         [(
             StreamProtocol::new(TRANSFER_PROTOCOL),
@@ -337,7 +385,7 @@ async fn run_lan_mesh(
         .with_relay_client(noise::Config::new, yamux::Config::default)
         .map_err(|error| error.to_string())?
         .with_behaviour(|key, relay_client| MeshBehaviour {
-            mdns,
+            mdns: Toggle::from(mdns),
             transfer,
             relay_client,
             identify: identify::Behaviour::new(identify::Config::new(
@@ -358,7 +406,16 @@ async fn run_lan_mesh(
         let _ = swarm.dial(address.clone());
         let _ = app.emit("mesh-status", "relay-connecting");
     } else {
-        let _ = app.emit("mesh-status", "discovering");
+        let status = if lan_discovery_enabled && internet_p2p_enabled {
+            "discovering-lan;internet-p2p-needs-relay"
+        } else if lan_discovery_enabled {
+            "discovering-lan"
+        } else if relay_allowed {
+            "internet-p2p-needs-relay-address"
+        } else {
+            "internet-p2p-relay-disabled"
+        };
+        let _ = app.emit("mesh-status", status);
     }
     let local_peer_id = swarm.local_peer_id().to_owned();
     let mut pending_requests: HashMap<
@@ -366,6 +423,8 @@ async fn run_lan_mesh(
         oneshot::Sender<Result<ChunkResponse, String>>,
     > = HashMap::new();
     let mut source_transfers: HashMap<String, SourceTransfer> = HashMap::new();
+    let mut lan_peer_addresses: HashMap<PeerId, HashSet<Multiaddr>> = HashMap::new();
+    let mut peer_connections: HashMap<PeerId, HashMap<ConnectionId, String>> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -393,6 +452,7 @@ async fn run_lan_mesh(
                         if peer_id == local_peer_id || !is_trusted(&trusted_peer_ids, &peer_id) {
                             continue;
                         }
+                        lan_peer_addresses.entry(peer_id.clone()).or_default().insert(address.clone());
                         let _ = app.emit("mesh-peer-update", MeshPeerUpdate {
                             peer_id: peer_id.to_string(),
                             status: "discovered".to_owned(),
@@ -410,6 +470,12 @@ async fn run_lan_mesh(
                 }
                 SwarmEvent::Behaviour(MeshEvent::Mdns(mdns::Event::Expired(peers))) => {
                     for (peer_id, address) in peers {
+                        if let Some(addresses) = lan_peer_addresses.get_mut(&peer_id) {
+                            addresses.remove(&address);
+                            if addresses.is_empty() {
+                                lan_peer_addresses.remove(&peer_id);
+                            }
+                        }
                         if is_trusted(&trusted_peer_ids, &peer_id) {
                             let _ = app.emit("mesh-peer-update", MeshPeerUpdate {
                                 peer_id: peer_id.to_string(),
@@ -459,7 +525,7 @@ async fn run_lan_mesh(
                     let _ = app.emit("mesh-status", format!("internet-p2p:{event:?}"));
                 }
                 SwarmEvent::Behaviour(MeshEvent::Identify) => {}
-                SwarmEvent::ConnectionEstablished { peer_id, .. } => {
+                SwarmEvent::ConnectionEstablished { peer_id, connection_id, endpoint, .. } => {
                     if Some(peer_id) == relay_peer_id {
                         let _ = app.emit("mesh-status", "relay-connected");
                         if let Some(address) = relay_address.as_ref() {
@@ -471,24 +537,47 @@ async fn run_lan_mesh(
                             }
                         }
                     } else if is_trusted(&trusted_peer_ids, &peer_id) {
+                        let transport = if endpoint.is_relayed() {
+                            "P2P_RELAY"
+                        } else if lan_peer_addresses.contains_key(&peer_id) {
+                            "LAN_DIRECT"
+                        } else {
+                            "P2P_DIRECT"
+                        };
+                        peer_connections.entry(peer_id.clone()).or_default().insert(connection_id, transport.to_owned());
+                        update_peer_transfer_path(&peer_transfer_paths, &peer_connections, &peer_id);
                         let _ = app.emit("mesh-peer-update", MeshPeerUpdate {
                             peer_id: peer_id.to_string(),
-                            status: "connected".to_owned(),
-                            multiaddr: None,
+                            status: format!("connected:{transport}"),
+                            multiaddr: Some(endpoint.get_remote_address().to_string()),
                         });
                     } else {
                         let _ = swarm.disconnect_peer_id(peer_id);
                     }
                 }
-                SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                SwarmEvent::ConnectionClosed { peer_id, connection_id, num_established, .. } => {
                     if Some(peer_id) == relay_peer_id {
                         let _ = app.emit("mesh-status", "relay-disconnected");
                     } else {
-                        let _ = app.emit("mesh-peer-update", MeshPeerUpdate {
-                            peer_id: peer_id.to_string(),
-                            status: "disconnected".to_owned(),
-                            multiaddr: None,
-                        });
+                        let known_connection = if let Some(connections) = peer_connections.get_mut(&peer_id) {
+                            connections.remove(&connection_id);
+                            true
+                        } else {
+                            false
+                        };
+                        if num_established == 0 {
+                            peer_connections.remove(&peer_id);
+                            if let Ok(mut paths) = peer_transfer_paths.write() {
+                                paths.remove(&peer_id.to_string());
+                            }
+                            let _ = app.emit("mesh-peer-update", MeshPeerUpdate {
+                                peer_id: peer_id.to_string(),
+                                status: "disconnected".to_owned(),
+                                multiaddr: None,
+                            });
+                        } else if known_connection {
+                            update_peer_transfer_path(&peer_transfer_paths, &peer_connections, &peer_id);
+                        }
                     }
                 }
                 SwarmEvent::NewListenAddr { address, .. } => {
@@ -503,10 +592,44 @@ async fn run_lan_mesh(
     if let Ok(mut sender) = command_sender.lock() {
         *sender = None;
     }
+    if let Ok(mut paths) = peer_transfer_paths.write() {
+        paths.clear();
+    }
     for (_, sender) in pending_requests {
         let _ = sender.send(Err("The LAN P2P connection was stopped".to_owned()));
     }
     Ok(())
+}
+
+fn update_peer_transfer_path(
+    shared_paths: &RwLock<HashMap<String, String>>,
+    connections: &HashMap<PeerId, HashMap<ConnectionId, String>>,
+    peer_id: &PeerId,
+) {
+    let path = connections
+        .get(peer_id)
+        .and_then(|paths| {
+            paths
+                .values()
+                .min_by_key(|path| transfer_path_priority(path))
+        })
+        .cloned();
+    if let Ok(mut shared) = shared_paths.write() {
+        if let Some(path) = path {
+            shared.insert(peer_id.to_string(), path);
+        } else {
+            shared.remove(&peer_id.to_string());
+        }
+    }
+}
+
+fn transfer_path_priority(path: &str) -> u8 {
+    match path {
+        "LAN_DIRECT" => 0,
+        "P2P_DIRECT" => 1,
+        "P2P_RELAY" => 2,
+        _ => u8::MAX,
+    }
 }
 
 fn configured_relay_address() -> Result<Option<Multiaddr>, String> {
@@ -735,7 +858,7 @@ fn is_trusted(trusted_peer_ids: &RwLock<HashSet<String>>, peer_id: &PeerId) -> b
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_relay_address, relay_peer_address, relay_peer_id};
+    use super::{parse_relay_address, relay_peer_address, relay_peer_id, transfer_path_priority};
     use libp2p::{multiaddr::Protocol, Multiaddr, PeerId};
     use std::str::FromStr;
 
@@ -761,5 +884,11 @@ mod tests {
             .iter()
             .any(|part| matches!(part, Protocol::P2pCircuit)));
         assert!(matches!(route.iter().last(), Some(Protocol::P2p(id)) if id == peer_id));
+    }
+
+    #[test]
+    fn preferred_transfer_path_prioritizes_local_direct_then_internet_direct_then_relay() {
+        assert!(transfer_path_priority("LAN_DIRECT") < transfer_path_priority("P2P_DIRECT"));
+        assert!(transfer_path_priority("P2P_DIRECT") < transfer_path_priority("P2P_RELAY"));
     }
 }

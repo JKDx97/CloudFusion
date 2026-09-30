@@ -30,6 +30,8 @@ interface RegisteredDevice {
   id: string;
   p2pEnabled: boolean;
   lanDiscoveryEnabled: boolean;
+  internetP2pEnabled: boolean;
+  relayAllowed: boolean;
   serveLocalFiles: boolean;
 }
 
@@ -79,6 +81,9 @@ export class DesktopSyncComponent implements OnInit, OnDestroy {
   readonly busy = signal(false);
   readonly error = signal<string | null>(null);
   readonly meshEnabled = signal(false);
+  readonly lanDiscoveryEnabled = signal(false);
+  readonly internetP2pEnabled = signal(false);
+  readonly relayAllowed = signal(true);
   readonly serveLocalFiles = signal(false);
   readonly meshBusy = signal(false);
   readonly meshPeers = signal<MeshPeer[]>([]);
@@ -176,49 +181,39 @@ export class DesktopSyncComponent implements OnInit, OnDestroy {
     }
   }
 
-  async enableLanMesh(): Promise<void> {
+  async updateMeshSetting(event: Event, setting: 'lanDiscoveryEnabled' | 'internetP2pEnabled' | 'relayAllowed'): Promise<void> {
     const deviceId = this.authService.deviceId;
     if (!deviceId) {
       this.error.set('La sesión Desktop no incluye un dispositivo registrado. Cierra sesión e inicia de nuevo.');
       return;
     }
+    const value = (event.target as HTMLInputElement).checked;
+    const next = {
+      lanDiscoveryEnabled: setting === 'lanDiscoveryEnabled' ? value : this.lanDiscoveryEnabled(),
+      internetP2pEnabled: setting === 'internetP2pEnabled' ? value : this.internetP2pEnabled(),
+      relayAllowed: setting === 'relayAllowed' ? value : this.relayAllowed(),
+    };
+    const p2pEnabled = next.lanDiscoveryEnabled || next.internetP2pEnabled;
     this.meshBusy.set(true);
     this.error.set(null);
     try {
+      await this.invoke<void>('stop_lan_mesh');
       await firstValueFrom(this.http.patch<ApiResponse<RegisteredDevice>>(
         `${this.apiUrl}/devices/${deviceId}/settings`,
-        { p2pEnabled: true, lanDiscoveryEnabled: true, internetP2pEnabled: false },
+        { p2pEnabled, ...next },
       ));
       await this.loadMeshConfiguration(false);
-      await this.configureMeshApi();
-      await this.invoke<void>('start_lan_mesh');
-      this.meshEnabled.set(true);
-      this.meshStatus.set('Buscando dispositivos autorizados en la red local…');
-    } catch {
-      this.meshEnabled.set(false);
-      this.error.set('No se pudo activar la conexión LAN. Comprueba tu conexión con CloudFusion y vuelve a intentar.');
-    } finally {
-      this.meshBusy.set(false);
-    }
-  }
-
-  async disableLanMesh(): Promise<void> {
-    const deviceId = this.authService.deviceId;
-    this.meshBusy.set(true);
-    try {
-      await this.invoke<void>('stop_lan_mesh');
-      this.meshEnabled.set(false);
-      if (deviceId) {
-        await firstValueFrom(this.http.patch<ApiResponse<RegisteredDevice>>(
-          `${this.apiUrl}/devices/${deviceId}/settings`,
-          { p2pEnabled: false, lanDiscoveryEnabled: false },
-        ));
+      if (p2pEnabled) {
+        await this.configureMeshApi();
+        await this.invoke<void>('start_lan_mesh', next);
+        this.meshStatus.set('Buscando dispositivos autorizados con las opciones seleccionadas…');
+      } else {
+        this.meshStatus.set('Desactivada');
+        this.meshPeerStatuses.set({});
       }
-      this.meshStatus.set('Desactivada');
-      this.meshPeerStatuses.set({});
-      await this.loadMeshConfiguration(false);
     } catch {
-      this.error.set('No se pudo detener la conexión LAN.');
+      this.meshEnabled.set(false);
+      this.error.set('No se pudo actualizar la conexión entre dispositivos. Comprueba tu conexión con CloudFusion y vuelve a intentar.');
     } finally {
       this.meshBusy.set(false);
     }
@@ -232,14 +227,24 @@ export class DesktopSyncComponent implements OnInit, OnDestroy {
       firstValueFrom(this.http.get<ApiResponse<MeshPeer[]>>(`${this.apiUrl}/devices/mesh-peers`)),
     ]);
     const current = devices.data.find((item) => item.id === deviceId);
-    const enabled = !!current?.p2pEnabled && !!current.lanDiscoveryEnabled;
+    const lan = !!current?.lanDiscoveryEnabled;
+    const internet = !!current?.internetP2pEnabled;
+    const relay = current?.relayAllowed ?? true;
+    const enabled = !!current?.p2pEnabled && (lan || internet);
     this.meshEnabled.set(enabled);
-      this.serveLocalFiles.set(!!current?.serveLocalFiles);
+    this.lanDiscoveryEnabled.set(lan);
+    this.internetP2pEnabled.set(internet);
+    this.relayAllowed.set(relay);
+    this.serveLocalFiles.set(!!current?.serveLocalFiles);
     this.meshPeers.set(peers.data);
     await this.invoke<void>('set_trusted_mesh_peers', { peerIds: peers.data.map((peer) => peer.peerId) });
     if (enabled && startIfEnabled) {
       await this.configureMeshApi();
-      await this.invoke<void>('start_lan_mesh');
+      await this.invoke<void>('start_lan_mesh', {
+        lanDiscoveryEnabled: lan,
+        internetP2pEnabled: internet,
+        relayAllowed: relay,
+      });
     }
   }
 

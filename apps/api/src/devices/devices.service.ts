@@ -70,7 +70,10 @@ export class DevicesService {
 
   async listMeshPeers(userId: string) {
     const devices = await this.devices.find({
-      where: { userId, revokedAt: IsNull(), p2pEnabled: true, lanDiscoveryEnabled: true },
+      where: [
+        { userId, revokedAt: IsNull(), p2pEnabled: true, lanDiscoveryEnabled: true },
+        { userId, revokedAt: IsNull(), p2pEnabled: true, internetP2pEnabled: true },
+      ],
       order: { lastSeenAt: 'DESC' },
     });
     return devices

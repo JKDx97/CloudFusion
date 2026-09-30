@@ -76,6 +76,19 @@ describe('DevicesService', () => {
     expect(result).not.toHaveProperty('refreshTokenHash');
   });
 
+  it('lists enabled peers for either LAN discovery or Internet P2P', async () => {
+    repository.find.mockResolvedValue([]);
+
+    await service.listMeshPeers('user-id');
+
+    expect(repository.find).toHaveBeenCalledWith(expect.objectContaining({
+      where: [
+        expect.objectContaining({ userId: 'user-id', p2pEnabled: true, lanDiscoveryEnabled: true }),
+        expect.objectContaining({ userId: 'user-id', p2pEnabled: true, internetP2pEnabled: true }),
+      ],
+    }));
+  });
+
   it('does not allow a revoked installation to silently register again', async () => {
     repository.findOne.mockResolvedValue(device({ revokedAt: new Date() }));
 

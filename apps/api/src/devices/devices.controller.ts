@@ -19,7 +19,7 @@ export class DevicesController {
   }
 
   @Get('mesh-peers')
-  @ApiOperation({ summary: 'List the authenticated user’s enabled LAN mesh peers' })
+  @ApiOperation({ summary: 'List the authenticated user’s enabled LAN and Internet mesh peers' })
   listMeshPeers(@Req() request: AuthenticatedRequest) {
     return this.devices.listMeshPeers(request.user.sub);
   }

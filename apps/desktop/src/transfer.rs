@@ -146,7 +146,8 @@ pub async fn download_p2p_file(
 
     if result.is_err() {
         let _ = tokio::fs::remove_file(&partial).await;
-        if update_transfer_state(&credentials, &transfer_id, "FAILED", None)
+        let transport = manager.transfer_path_for_peer(&source_peer_id);
+        if update_transfer_state(&credentials, &transfer_id, "FAILED", None, &transport)
             .await
             .is_err()
         {
@@ -168,6 +169,7 @@ async fn receive_and_finalize(
     partial: &Path,
     target: &Path,
 ) -> Result<(), String> {
+    let transport = manager.transfer_path_for_peer(source_peer_id);
     let mut output = tokio::fs::OpenOptions::new()
         .write(true)
         .open(partial)
@@ -228,10 +230,18 @@ async fn receive_and_finalize(
                 "bytesTransferred": offset.to_string(),
                 "totalBytes": total_bytes.to_string(),
                 "status": "TRANSFERRING",
+                "transport": transport,
             }),
         );
         if offset == total_bytes || offset.saturating_sub(last_reported) >= 1_048_576 {
-            update_transfer_state(credentials, transfer_id, "TRANSFERRING", Some(offset)).await?;
+            update_transfer_state(
+                credentials,
+                transfer_id,
+                "TRANSFERRING",
+                Some(offset),
+                &transport,
+            )
+            .await?;
             last_reported = offset;
         }
         if total_bytes == 0 || response.finished {
@@ -243,7 +253,14 @@ async fn receive_and_finalize(
     if offset != total_bytes || !actual_hash.eq_ignore_ascii_case(content_hash) {
         return Err("The received file failed its SHA-256 integrity check".to_owned());
     }
-    update_transfer_state(credentials, transfer_id, "VERIFYING", Some(total_bytes)).await?;
+    update_transfer_state(
+        credentials,
+        transfer_id,
+        "VERIFYING",
+        Some(total_bytes),
+        &transport,
+    )
+    .await?;
     output
         .flush()
         .await
@@ -256,7 +273,14 @@ async fn receive_and_finalize(
     tokio::fs::rename(partial, target)
         .await
         .map_err(|_| "Could not atomically move the verified file into place; an existing file was not overwritten".to_owned())?;
-    update_transfer_state(credentials, transfer_id, "COMPLETED", Some(total_bytes)).await?;
+    update_transfer_state(
+        credentials,
+        transfer_id,
+        "COMPLETED",
+        Some(total_bytes),
+        &transport,
+    )
+    .await?;
     let _ = app.emit(
         "p2p-transfer-progress",
         serde_json::json!({
@@ -264,6 +288,7 @@ async fn receive_and_finalize(
             "bytesTransferred": total_bytes.to_string(),
             "totalBytes": total_bytes.to_string(),
             "status": "COMPLETED",
+            "transport": transport,
         }),
     );
     Ok(())
@@ -334,8 +359,9 @@ async fn update_transfer_state(
     transfer_id: &str,
     status: &str,
     bytes_transferred: Option<u64>,
+    transport: &str,
 ) -> Result<(), String> {
-    let mut payload = serde_json::json!({ "status": status, "transport": "LAN_DIRECT" });
+    let mut payload = serde_json::json!({ "status": status, "transport": transport });
     if let Some(bytes) = bytes_transferred {
         payload["bytesTransferred"] = serde_json::Value::String(bytes.to_string());
     }

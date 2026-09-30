@@ -42,6 +42,8 @@ interface RegisteredP2pDevice {
   id: string;
   p2pEnabled: boolean;
   lanDiscoveryEnabled: boolean;
+  internetP2pEnabled: boolean;
+  relayAllowed: boolean;
 }
 
 interface TrustedP2pPeer {
@@ -661,10 +663,14 @@ export class DriveComponent implements OnInit {
         firstValueFrom(this.http.get<ApiResponse<TrustedP2pPeer[]>>(`${this.apiUrl}/devices/mesh-peers`)),
       ]);
       const current = devices.data.find((device) => device.id === deviceId);
-      if (!current?.p2pEnabled || !current.lanDiscoveryEnabled) return;
+      if (!current?.p2pEnabled || (!current.lanDiscoveryEnabled && !current.internetP2pEnabled)) return;
       await this.invokeDesktop<void>('configure_mesh_api', { apiUrl: this.apiUrl, accessToken });
       await this.invokeDesktop<void>('set_trusted_mesh_peers', { peerIds: peers.data.map((peer) => peer.peerId) });
-      await this.invokeDesktop<void>('start_lan_mesh');
+      await this.invokeDesktop<void>('start_lan_mesh', {
+        lanDiscoveryEnabled: current.lanDiscoveryEnabled,
+        internetP2pEnabled: current.internetP2pEnabled,
+        relayAllowed: current.relayAllowed,
+      });
     } catch {
       // The cloud download action remains available when this device cannot join the LAN mesh.
     }

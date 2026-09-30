@@ -33,18 +33,25 @@
       </section>
 
       <section class="rounded-2xl border border-indigo-200 bg-white p-5 shadow-sm">
-        <div class="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
-          <div>
-            <h2 class="font-semibold">Red local entre tus dispositivos</h2>
-            <p class="mt-1 max-w-2xl text-sm leading-6 text-slate-600">Permite conexiones directas cifradas en la misma LAN, únicamente con otros dispositivos de tu cuenta que también tengan esta opción activada.</p>
-          </div>
-          @if (meshEnabled()) {
-            <button type="button" (click)="disableLanMesh()" [disabled]="meshBusy()" class="shrink-0 rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-700 hover:bg-slate-50 disabled:opacity-60">{{ meshBusy() ? 'Desactivando…' : 'Desactivar LAN' }}</button>
-          } @else {
-            <button type="button" (click)="enableLanMesh()" [disabled]="meshBusy()" class="shrink-0 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-indigo-700 disabled:opacity-60">{{ meshBusy() ? 'Activando…' : 'Activar LAN segura' }}</button>
-          }
+        <div>
+          <h2 class="font-semibold">Conexión entre tus dispositivos</h2>
+          <p class="mt-1 max-w-3xl text-sm leading-6 text-slate-600">Elige cómo se pueden encontrar los equipos autorizados de tu cuenta. Las transferencias P2P solo se ofrecen cuando existe una copia local verificada.</p>
         </div>
-        <p class="mt-4 rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-600">Estado: {{ meshStatus() }}</p>
+        <div class="mt-4 grid gap-3 md:grid-cols-2">
+          <label class="flex items-start gap-3 rounded-lg border border-slate-200 p-3 text-sm text-slate-700">
+            <input class="mt-1" type="checkbox" [checked]="lanDiscoveryEnabled()" [disabled]="meshBusy()" (change)="updateMeshSetting($event, 'lanDiscoveryEnabled')" />
+            <span><span class="font-semibold">Descubrimiento en red local (LAN)</span><span class="mt-1 block text-xs leading-5 text-slate-500">Busca equipos autorizados conectados a la misma red.</span></span>
+          </label>
+          <label class="flex items-start gap-3 rounded-lg border border-slate-200 p-3 text-sm text-slate-700">
+            <input class="mt-1" type="checkbox" [checked]="internetP2pEnabled()" [disabled]="meshBusy()" (change)="updateMeshSetting($event, 'internetP2pEnabled')" />
+            <span><span class="font-semibold">Intentar conexión P2P por Internet</span><span class="mt-1 block text-xs leading-5 text-slate-500">Intenta una conexión directa entre equipos; depende de la red y de tener un servicio de descubrimiento/relay configurado.</span></span>
+          </label>
+          <label class="flex items-start gap-3 rounded-lg border border-slate-200 p-3 text-sm text-slate-700 md:col-span-2">
+            <input class="mt-1" type="checkbox" [checked]="relayAllowed()" [disabled]="meshBusy()" (change)="updateMeshSetting($event, 'relayAllowed')" />
+            <span><span class="font-semibold">Permitir relay como ruta alternativa</span><span class="mt-1 block text-xs leading-5 text-slate-500">El relay debe estar desplegado y configurado en ambos equipos mediante CLOUDFUSION_RELAY_MULTIADDR; CloudFusion no aloja un relay público automáticamente.</span></span>
+          </label>
+        </div>
+        <p class="mt-4 rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-600">Estado: {{ meshStatus() }} · {{ meshEnabled() ? 'Conexión habilitada' : 'Conexión desactivada' }}</p>
         <label class="mt-4 flex items-start gap-3 rounded-lg border border-slate-200 p-3 text-sm text-slate-700">
           <input class="mt-1" type="checkbox" [checked]="serveLocalFiles()" (change)="updateLocalFileServing($event)" />
           <span><span class="font-semibold">Permitir que este equipo ofrezca copias locales verificadas</span><span class="mt-1 block text-xs leading-5 text-slate-500">Solo tus dispositivos autorizados pueden solicitarlas. Desactívalo para dejar de compartir desde este equipo.</span></span>
@@ -57,7 +64,7 @@
                 @for (peer of meshPeers(); track peer.id) {
                   <li class="flex flex-wrap items-center justify-between gap-2 py-3 text-sm">
                     <span class="font-medium text-slate-700">{{ peer.name }} <span class="font-normal text-slate-500">· {{ peer.platform }}</span></span>
-                    <span class="text-slate-500">{{ meshPeerStatuses()[peer.peerId] || 'Esperando en la red local' }}</span>
+                    <span class="text-slate-500">{{ meshPeerStatuses()[peer.peerId] || 'Esperando conexión del dispositivo' }}</span>
                   </li>
                 }
               </ul>
@@ -66,7 +73,7 @@
             }
           </div>
         }
-        <p class="mt-3 text-xs leading-5 text-slate-500">En LAN, los archivos anunciados se transfieren en bloques, por el canal cifrado del dispositivo y con verificación SHA-256. La sincronización automática y las conexiones P2P fuera de LAN todavía no están disponibles.</p>
+        <p class="mt-3 text-xs leading-5 text-slate-500">Las copias P2P se transfieren en bloques por un canal cifrado y se validan con SHA-256. La ruta real se registra como LAN directa, P2P directo o relay. El P2P por Internet aún depende de que los dispositivos puedan encontrarse; si no hay una ruta accesible, usa la descarga cloud. Esto no activa sincronización automática.</p>
       </section>
 
       <section class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
