@@ -121,6 +121,21 @@ export class VirtualDriveController {
   @UseInterceptors(FileInterceptor('file', { storage: diskStorage({ destination: uploadDirectory, filename: (_request, file, callback) => callback(null, `${Date.now()}-${randomBytes(8).toString('hex')}-${file.originalname}`) }), limits: { fileSize: Number(process.env.CLOUD_UPLOAD_MAX_BYTES ?? 52_428_800) } }))
   upload(@Req() request: AuthenticatedRequest, @UploadedFile() file: Express.Multer.File, @Body('parentId') parentId?: string) { return this.service.upload(request.user.sub, file, parentId); }
 
+  @Post('sync-upload')
+  @ApiOperation({ summary: 'Sync a Desktop file path into the personal virtual drive, preserving changed remote copies as conflicts' })
+  @ApiConsumes('multipart/form-data')
+  @ApiBody({ schema: { type: 'object', required: ['rootId', 'relativePath', 'file'], properties: { rootId: { type: 'string', format: 'uuid' }, relativePath: { type: 'string' }, expectedVersionId: { type: 'string', format: 'uuid' }, file: { type: 'string', format: 'binary' } } } })
+  @UseInterceptors(FileInterceptor('file', { storage: diskStorage({ destination: uploadDirectory, filename: (_request, file, callback) => callback(null, `${Date.now()}-${randomBytes(8).toString('hex')}-${file.originalname}`) }), limits: { fileSize: Number(process.env.CLOUD_UPLOAD_MAX_BYTES ?? 52_428_800) } }))
+  syncUpload(
+    @Req() request: AuthenticatedRequest,
+    @UploadedFile() file: Express.Multer.File,
+    @Body('rootId') rootId: string,
+    @Body('relativePath') relativePath: string,
+    @Body('expectedVersionId') expectedVersionId?: string,
+  ) {
+    return this.service.uploadSyncFile(request.user.sub, rootId, relativePath, file, expectedVersionId);
+  }
+
   @Patch('nodes/:id')
   @ApiOperation({ summary: 'Rename a virtual node without touching provider objects' })
   rename(@Req() request: AuthenticatedRequest, @Param('id') id: string, @Body() dto: UpdateVirtualNodeDto) { return this.service.rename(request.user.sub, id, dto); }

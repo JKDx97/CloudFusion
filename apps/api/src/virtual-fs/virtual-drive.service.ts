@@ -37,6 +37,7 @@ import { EncryptionService, DecryptionMetadata } from '../data-protection/encryp
 import { DataProtectionException } from '../data-protection/data-protection-error';
 import { DataProtectionEventsService } from '../realtime/data-protection-events.service';
 import { PermissionsService } from '../permissions/permissions.service';
+import { isUUID } from 'class-validator';
 
 export interface VirtualNodeResponse {
   id: string;
@@ -65,6 +66,10 @@ export interface VirtualUploadResult {
   deduplicated?: boolean;
   version?: { id: string; versionNumber: number; checksum: string; size: number; createdAt: Date };
   warning?: string;
+}
+
+export interface SyncUploadResult extends VirtualUploadResult {
+  conflict: boolean;
 }
 
 @Injectable()
@@ -270,6 +275,54 @@ export class VirtualDriveService {
     const normalizedComment = comment?.trim() || undefined;
     if (normalizedComment && normalizedComment.length > 500) throw new BadRequestException('Version comments must be 500 characters or fewer');
     return this.uploadContent(node.userId, file, node.parentId ?? undefined, node.id, normalizedComment, userId);
+  }
+
+  async uploadSyncFile(
+    userId: string,
+    rootId: string,
+    relativePath: string,
+    file: Express.Multer.File,
+    expectedVersionId?: string,
+  ): Promise<SyncUploadResult> {
+    if (!file) throw new BadRequestException('A file is required');
+    if (!isUUID(rootId) || (expectedVersionId !== undefined && !isUUID(expectedVersionId))) {
+      throw new BadRequestException('Invalid sync destination or version identifier');
+    }
+    const segments = this.parseSyncRelativePath(relativePath);
+    const root = await this.findOwned(rootId, userId);
+    if (root.workspaceId || root.type !== VirtualNodeType.FOLDER) {
+      throw new NotFoundException('Personal sync folder not found');
+    }
+
+    let parentId = root.id;
+    for (const segment of segments.slice(0, -1)) {
+      const child = await this.nodes.findOne({
+        where: { userId, workspaceId: IsNull(), parentId, name: segment, deletedAt: IsNull() },
+      });
+      if (child) {
+        if (child.type !== VirtualNodeType.FOLDER) throw new ConflictException('A file blocks this synchronized folder path');
+        parentId = child.id;
+        continue;
+      }
+      parentId = (await this.createFolder(userId, { name: segment, parentId })).id;
+    }
+
+    const name = segments[segments.length - 1];
+    const existing = await this.nodes.findOne({
+      where: { userId, workspaceId: IsNull(), parentId, name, deletedAt: IsNull() },
+    });
+    if (existing?.type === VirtualNodeType.FILE && expectedVersionId && existing.currentVersionId === expectedVersionId) {
+      return { ...await this.uploadVersion(userId, existing.id, file), conflict: false };
+    }
+
+    let conflict = false;
+    if (existing) {
+      conflict = true;
+      file.originalname = await this.availableConflictName(userId, parentId, name);
+    } else {
+      file.originalname = name;
+    }
+    return { ...await this.upload(userId, file, parentId), conflict };
   }
 
   private async uploadContent(
@@ -841,6 +894,35 @@ export class VirtualDriveService {
     const name = value.trim();
     if (!name || name === '.' || name === '..' || name.includes('/') || name.includes('\\')) throw new BadRequestException('Invalid virtual node name');
     return name;
+  }
+
+  private parseSyncRelativePath(value: string): string[] {
+    if (typeof value !== 'string' || value.length > 4096 || /^[\\/]/.test(value)) {
+      throw new BadRequestException('Invalid synchronized file path');
+    }
+    const segments = value.split(/[\\/]/);
+    if (segments.length > 128 || segments.some((segment) =>
+      !segment || segment.length > 255 || segment.trim() !== segment ||
+      segment === '.' || segment === '..' || /[\u0000-\u001f\u007f<>:"|?*]/.test(segment))) {
+      throw new BadRequestException('Invalid synchronized file path');
+    }
+    return segments;
+  }
+
+  private async availableConflictName(userId: string, parentId: string, name: string): Promise<string> {
+    const extensionIndex = name.lastIndexOf('.');
+    const stem = extensionIndex > 0 ? name.slice(0, extensionIndex) : name;
+    const extension = extensionIndex > 0 ? name.slice(extensionIndex) : '';
+    const stamp = new Date().toISOString().replace(/[-:TZ.]/g, '').slice(0, 17);
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      const suffix = attempt ? `-${attempt}` : '';
+      const candidate = `${stem} (conflicto ${stamp}${suffix})${extension}`;
+      const existing = await this.nodes.findOne({
+        where: { userId, workspaceId: IsNull(), parentId, name: candidate, deletedAt: IsNull() },
+      });
+      if (!existing) return candidate;
+    }
+    throw new ConflictException('Could not create a unique name for the synchronized conflict');
   }
 
   private toResponse(node: VirtualNode): VirtualNodeResponse {

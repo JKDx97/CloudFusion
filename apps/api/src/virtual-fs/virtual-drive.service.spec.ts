@@ -125,6 +125,59 @@ describe('VirtualDriveService', () => {
     expect(fixtureData.nodes.save).not.toHaveBeenCalled();
   });
 
+  it('rejects traversal paths before looking up a sync destination', async () => {
+    const fixtureData = fixture();
+    const file = { originalname: 'secret.txt' } as Express.Multer.File;
+
+    await expect(fixtureData.service.uploadSyncFile('owner-id', '00000000-0000-4000-8000-000000000001', '../secret.txt', file))
+      .rejects.toMatchObject({ status: 400 });
+    expect(fixtureData.nodes.findOne).not.toHaveBeenCalled();
+  });
+
+  it('writes a new version when the local file is based on the current remote version', async () => {
+    const root = node({ id: '00000000-0000-4000-8000-000000000001' });
+    const existing = node({
+      id: '00000000-0000-4000-8000-000000000002', name: 'report.txt', type: VirtualNodeType.FILE,
+      parentId: root.id, isRoot: false, currentVersionId: '00000000-0000-4000-8000-000000000003',
+    });
+    const fixtureData = fixture();
+    fixtureData.nodes.findOne.mockResolvedValueOnce(root).mockResolvedValueOnce(existing);
+    const upload = jest.spyOn(fixtureData.service, 'uploadVersion').mockResolvedValue({
+      node: { id: existing.id } as never,
+      queued: true,
+      replicas: 1,
+    });
+
+    const result = await fixtureData.service.uploadSyncFile(
+      'owner-id', root.id, 'report.txt', { originalname: 'report.txt' } as Express.Multer.File, existing.currentVersionId!,
+    );
+
+    expect(upload).toHaveBeenCalledWith('owner-id', existing.id, expect.any(Object));
+    expect(result).toEqual(expect.objectContaining({ conflict: false, node: { id: existing.id } }));
+  });
+
+  it('keeps both copies when the remote file changed since the local sync base', async () => {
+    const root = node({ id: '00000000-0000-4000-8000-000000000011' });
+    const existing = node({
+      id: '00000000-0000-4000-8000-000000000012', name: 'report.txt', type: VirtualNodeType.FILE,
+      parentId: root.id, isRoot: false, currentVersionId: '00000000-0000-4000-8000-000000000013',
+    });
+    const fixtureData = fixture();
+    fixtureData.nodes.findOne.mockResolvedValueOnce(root).mockResolvedValueOnce(existing).mockResolvedValueOnce(null);
+    const file = { originalname: 'report.txt' } as Express.Multer.File;
+    jest.spyOn(fixtureData.service, 'upload').mockResolvedValue({
+      node: { id: 'conflict-file' } as never,
+      queued: true,
+      replicas: 1,
+    });
+
+    const result = await fixtureData.service.uploadSyncFile('owner-id', root.id, 'report.txt', file, '00000000-0000-4000-8000-000000000014');
+
+    expect(file.originalname).toMatch(/^report \(conflicto \d+\)\.txt$/);
+    expect(result).toEqual(expect.objectContaining({ conflict: true, node: { id: 'conflict-file' } }));
+    expect(fixtureData.service.upload).toHaveBeenCalledWith('owner-id', file, root.id);
+  });
+
   it('returns only safe version history fields for an owned file', async () => {
     const file = node({ id: 'file-id', name: 'thesis.pdf', type: VirtualNodeType.FILE, isRoot: false, currentVersionId: 'version-2' });
     const fixtureData = fixture();
