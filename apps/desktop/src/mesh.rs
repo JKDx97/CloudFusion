@@ -1,11 +1,13 @@
 use futures::StreamExt;
 use libp2p::{
+    dcutr, identify,
     identity::Keypair,
     mdns,
     multiaddr::Protocol,
+    noise, relay,
     request_response::{self, Message, OutboundRequestId, ProtocolSupport},
     swarm::{NetworkBehaviour, StreamProtocol, SwarmEvent},
-    Multiaddr, PeerId, SwarmBuilder,
+    yamux, Multiaddr, PeerId, SwarmBuilder,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -92,12 +94,18 @@ struct SourceTransfer {
 struct MeshBehaviour {
     mdns: mdns::tokio::Behaviour,
     transfer: request_response::cbor::Behaviour<ChunkRequest, ChunkResponse>,
+    relay_client: relay::client::Behaviour,
+    identify: identify::Behaviour,
+    dcutr: dcutr::Behaviour,
 }
 
 #[derive(Debug)]
 enum MeshEvent {
     Mdns(mdns::Event),
     Transfer(request_response::Event<ChunkRequest, ChunkResponse>),
+    RelayClient(relay::client::Event),
+    Identify,
+    Dcutr(dcutr::Event),
 }
 
 impl From<mdns::Event> for MeshEvent {
@@ -109,6 +117,24 @@ impl From<mdns::Event> for MeshEvent {
 impl From<request_response::Event<ChunkRequest, ChunkResponse>> for MeshEvent {
     fn from(event: request_response::Event<ChunkRequest, ChunkResponse>) -> Self {
         Self::Transfer(event)
+    }
+}
+
+impl From<relay::client::Event> for MeshEvent {
+    fn from(event: relay::client::Event) -> Self {
+        Self::RelayClient(event)
+    }
+}
+
+impl From<identify::Event> for MeshEvent {
+    fn from(_: identify::Event) -> Self {
+        Self::Identify
+    }
+}
+
+impl From<dcutr::Event> for MeshEvent {
+    fn from(event: dcutr::Event) -> Self {
+        Self::Dcutr(event)
     }
 }
 
@@ -294,6 +320,8 @@ async fn run_lan_mesh(
     mut stop_rx: watch::Receiver<bool>,
 ) -> Result<(), String> {
     let local_peer_id = keypair.public().to_peer_id();
+    let relay_address = configured_relay_address()?;
+    let relay_peer_id = relay_address.as_ref().and_then(relay_peer_id);
     let mdns = mdns::tokio::Behaviour::new(Default::default(), local_peer_id)
         .map_err(|error| error.to_string())?;
     let transfer = request_response::cbor::Behaviour::new(
@@ -303,10 +331,21 @@ async fn run_lan_mesh(
         )],
         request_response::Config::default(),
     );
-    let mut swarm = SwarmBuilder::with_existing_identity(keypair)
+    let mut swarm = SwarmBuilder::with_existing_identity(keypair.clone())
         .with_tokio()
         .with_quic()
-        .with_behaviour(|_| MeshBehaviour { mdns, transfer })
+        .with_relay_client(noise::Config::new, yamux::Config::default)
+        .map_err(|error| error.to_string())?
+        .with_behaviour(|key, relay_client| MeshBehaviour {
+            mdns,
+            transfer,
+            relay_client,
+            identify: identify::Behaviour::new(identify::Config::new(
+                "/cloudfusion/1.0.0".to_owned(),
+                key.public(),
+            )),
+            dcutr: dcutr::Behaviour::new(key.public().to_peer_id()),
+        })
         .map_err(|error| error.to_string())?
         .build();
     let listen_address: Multiaddr = "/ip4/0.0.0.0/udp/0/quic-v1"
@@ -315,7 +354,12 @@ async fn run_lan_mesh(
     swarm
         .listen_on(listen_address)
         .map_err(|error| error.to_string())?;
-    let _ = app.emit("mesh-status", "discovering");
+    if let Some(address) = &relay_address {
+        let _ = swarm.dial(address.clone());
+        let _ = app.emit("mesh-status", "relay-connecting");
+    } else {
+        let _ = app.emit("mesh-status", "discovering");
+    }
     let local_peer_id = swarm.local_peer_id().to_owned();
     let mut pending_requests: HashMap<
         OutboundRequestId,
@@ -330,6 +374,9 @@ async fn run_lan_mesh(
                     if !is_trusted(&trusted_peer_ids, &command.peer_id) {
                         let _ = command.response.send(Err("This device is not trusted by CloudFusion".to_owned()));
                     } else {
+                        if let Some(address) = relay_address.as_ref().and_then(|relay| relay_peer_address(relay, &command.peer_id)) {
+                            swarm.add_peer_address(command.peer_id.clone(), address);
+                        }
                         let request_id = swarm.behaviour_mut().transfer.send_request(&command.peer_id, command.request);
                         pending_requests.insert(request_id, command.response);
                     }
@@ -405,8 +452,25 @@ async fn run_lan_mesh(
                         multiaddr: None,
                     });
                 }
+                SwarmEvent::Behaviour(MeshEvent::RelayClient(event)) => {
+                    let _ = app.emit("mesh-status", format!("relay:{event:?}"));
+                }
+                SwarmEvent::Behaviour(MeshEvent::Dcutr(event)) => {
+                    let _ = app.emit("mesh-status", format!("internet-p2p:{event:?}"));
+                }
+                SwarmEvent::Behaviour(MeshEvent::Identify) => {}
                 SwarmEvent::ConnectionEstablished { peer_id, .. } => {
-                    if is_trusted(&trusted_peer_ids, &peer_id) {
+                    if Some(peer_id) == relay_peer_id {
+                        let _ = app.emit("mesh-status", "relay-connected");
+                        if let Some(address) = relay_address.as_ref() {
+                            let reservation = address.clone().with(Protocol::P2pCircuit);
+                            if let Err(error) = swarm.listen_on(reservation) {
+                                let _ = app.emit("mesh-status", format!("relay-reservation-error:{error}"));
+                            } else {
+                                let _ = app.emit("mesh-status", "relay-reserving");
+                            }
+                        }
+                    } else if is_trusted(&trusted_peer_ids, &peer_id) {
                         let _ = app.emit("mesh-peer-update", MeshPeerUpdate {
                             peer_id: peer_id.to_string(),
                             status: "connected".to_owned(),
@@ -417,11 +481,20 @@ async fn run_lan_mesh(
                     }
                 }
                 SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                    let _ = app.emit("mesh-peer-update", MeshPeerUpdate {
-                        peer_id: peer_id.to_string(),
-                        status: "disconnected".to_owned(),
-                        multiaddr: None,
-                    });
+                    if Some(peer_id) == relay_peer_id {
+                        let _ = app.emit("mesh-status", "relay-disconnected");
+                    } else {
+                        let _ = app.emit("mesh-peer-update", MeshPeerUpdate {
+                            peer_id: peer_id.to_string(),
+                            status: "disconnected".to_owned(),
+                            multiaddr: None,
+                        });
+                    }
+                }
+                SwarmEvent::NewListenAddr { address, .. } => {
+                    if address.iter().any(|protocol| matches!(protocol, Protocol::P2pCircuit)) {
+                        let _ = app.emit("mesh-status", format!("relay-reserved:{address}"));
+                    }
                 }
                 _ => {}
             }
@@ -434,6 +507,45 @@ async fn run_lan_mesh(
         let _ = sender.send(Err("The LAN P2P connection was stopped".to_owned()));
     }
     Ok(())
+}
+
+fn configured_relay_address() -> Result<Option<Multiaddr>, String> {
+    let Ok(value) = std::env::var("CLOUDFUSION_RELAY_MULTIADDR") else {
+        return Ok(None);
+    };
+    parse_relay_address(&value).map(Some)
+}
+
+fn parse_relay_address(value: &str) -> Result<Multiaddr, String> {
+    let address = Multiaddr::from_str(value.trim())
+        .map_err(|_| "CLOUDFUSION_RELAY_MULTIADDR is not a valid multiaddress".to_owned())?;
+    if relay_peer_id(&address).is_none()
+        || address
+            .iter()
+            .any(|protocol| matches!(protocol, Protocol::P2pCircuit))
+    {
+        return Err(
+            "The relay address must end with /p2p/<relay-peer-id> and not contain /p2p-circuit"
+                .to_owned(),
+        );
+    }
+    Ok(address)
+}
+
+fn relay_peer_id(address: &Multiaddr) -> Option<PeerId> {
+    match address.iter().last()? {
+        Protocol::P2p(peer_id) => Some(peer_id),
+        _ => None,
+    }
+}
+
+fn relay_peer_address(relay_address: &Multiaddr, peer_id: &PeerId) -> Option<Multiaddr> {
+    Some(
+        relay_address
+            .clone()
+            .with(Protocol::P2pCircuit)
+            .with(Protocol::P2p(peer_id.clone())),
+    )
 }
 
 async fn serve_chunk_request(
@@ -619,4 +731,35 @@ fn is_trusted(trusted_peer_ids: &RwLock<HashSet<String>>, peer_id: &PeerId) -> b
         .read()
         .map(|trusted| trusted.contains(&peer_id.to_string()))
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_relay_address, relay_peer_address, relay_peer_id};
+    use libp2p::{multiaddr::Protocol, Multiaddr, PeerId};
+    use std::str::FromStr;
+
+    #[test]
+    fn relay_address_requires_a_trailing_relay_identity() {
+        let relay_id = PeerId::random();
+        let address = format!("/ip4/203.0.113.10/tcp/4001/p2p/{relay_id}");
+        let parsed = parse_relay_address(&address).expect("valid relay address");
+        assert_eq!(relay_peer_id(&parsed), Some(relay_id));
+
+        assert!(parse_relay_address("/ip4/203.0.113.10/tcp/4001").is_err());
+        assert!(parse_relay_address(&format!("{address}/p2p-circuit")).is_err());
+    }
+
+    #[test]
+    fn peer_route_uses_the_relay_circuit_protocol() {
+        let relay_id = PeerId::random();
+        let peer_id = PeerId::random();
+        let address = Multiaddr::from_str(&format!("/ip4/203.0.113.10/tcp/4001/p2p/{relay_id}"))
+            .expect("valid relay address");
+        let route = relay_peer_address(&address, &peer_id).expect("relay peer route");
+        assert!(route
+            .iter()
+            .any(|part| matches!(part, Protocol::P2pCircuit)));
+        assert!(matches!(route.iter().last(), Some(Protocol::P2p(id)) if id == peer_id));
+    }
 }

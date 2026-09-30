@@ -22,3 +22,5 @@ apps/api/uploads/
 # OS files
 .DS_Store
 Thumbs.db
+# Private CloudFusion Relay identity (never commit)
+/apps/relay/relay-key.pb

@@ -2,7 +2,7 @@
 
 The Tauri desktop shell reuses the Angular client in `apps/web`. It gives each installation a stable identity in the operating system credential store, registers that identity during login/registration, stores the rotating refresh token in Windows Credential Manager, and watches user-selected local folders.
 
-The desktop can discover same-account devices that explicitly enable LAN discovery and P2P, and establish authenticated QUIC connections to those trusted peers. mDNS only discovers endpoints; peer identities are registered and validated by the API. Local filesystem changes are recorded in a bounded journal and emitted to the UI, but **file contents are not synchronized or uploaded peer-to-peer yet**. The next milestone must define authorized change transfer, conflict handling, and recovery before any content is exchanged.
+The desktop can discover approved LAN devices and transfer authorized file chunks directly between trusted peers. The API's one-use tickets and live permission checks remain in force. Local folder changes are currently indexed and journaled; automatic bidirectional sync and conflict recovery are still future milestones.
 
 ## Run on Windows
 
@@ -14,3 +14,8 @@ cargo run --manifest-path apps/desktop/Cargo.toml
 ```
 
 The API must be running at `http://localhost:3000`. The desktop account should sign in through the app so the backend creates a device-bound session. The credential store and sync journal are kept under the operating system's per-application data directory; no private key or refresh token is written to the repository.
+# Internet P2P relay
+
+Desktop can optionally use a CloudFusion Circuit Relay v2 node alongside its LAN mesh. Configure `CLOUDFUSION_RELAY_MULTIADDR` in the Desktop process environment with the relay's public TCP address, ending in `/p2p/<relay-peer-id>`, then restart the app. Leave the variable unset to use LAN discovery only.
+
+See [the relay deployment guide](../relay/README.md) for the allowlist, resource limits, firewall ports and server setup. Relay transfers remain subject to the API-issued one-use ticket and the source device's live permission checks; the encrypted relay carries no stored file data.
