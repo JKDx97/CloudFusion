@@ -1,4 +1,4 @@
-import { HttpClient } from '@angular/common/http';
+import { HttpClient, HttpParams } from '@angular/common/http';
 import { Injectable, signal } from '@angular/core';
 import { firstValueFrom } from 'rxjs';
 import { AuthService } from '../auth/auth.service';
@@ -22,6 +22,7 @@ export interface DesktopSyncChange {
 interface SyncUploadReceipt {
   rootId: string;
   relativePath: string;
+  remotePath: string;
   nodeId: string;
   versionId: string;
   contentHash: string;
@@ -37,6 +38,50 @@ interface AvailabilityLease {
 interface SyncedNodeStatus {
   status: string;
   currentVersionId: string | null;
+}
+
+interface SyncManifestEntry {
+  relativePath: string;
+  remotePath: string;
+  versionId: string;
+  checksum: string | null;
+  sizeBytes: number | null;
+  versionNumber: number;
+}
+
+interface RemoteVirtualNode {
+  id: string;
+  name: string;
+  type: 'FILE' | 'FOLDER';
+  currentVersionId: string | null;
+  status: string;
+}
+
+interface RemoteFileVersion {
+  id: string;
+  versionNumber: number;
+  size: number;
+  checksum: string;
+}
+
+interface P2pAvailability {
+  deviceId: string;
+  peerId: string;
+}
+
+interface P2pTransferSession {
+  id: string;
+  sourceDeviceId: string;
+  destinationDeviceId: string;
+  nodeId: string;
+  versionId: string;
+  contentHash: string;
+  totalBytes: string;
+}
+
+interface RemoteSyncReceipt {
+  status: 'installed' | 'conflict' | 'unchanged' | 'deferred';
+  relativePath: string;
 }
 
 interface DesktopBridge extends Window {
@@ -58,6 +103,8 @@ export class DesktopSyncBackgroundService {
   private started = false;
   private lastUserId: string | null = null;
   private refreshInFlight?: Promise<void>;
+  private remotePollTimer?: ReturnType<typeof setInterval>;
+  private remotePollInFlight = false;
   private meshEnabled = false;
   private serveLocalFiles = false;
   private uploadQueue: Promise<void> = Promise.resolve();
@@ -79,15 +126,20 @@ export class DesktopSyncBackgroundService {
 
     this.auth.currentUser$.subscribe((user) => {
       if (!user) {
+        if (this.remotePollTimer) clearInterval(this.remotePollTimer);
+        this.remotePollTimer = undefined;
         this.withdrawAllCopies(true);
         this.rootsState.set([]);
         this.lastUserId = null;
+        void this.invoke<void>('stop_lan_mesh').catch(() => undefined);
         return;
       }
       if (user.id === this.lastUserId) return;
       if (this.lastUserId && this.lastUserId !== user.id) this.withdrawAllCopies(true);
+      if (this.remotePollTimer) clearInterval(this.remotePollTimer);
       this.lastUserId = user.id;
-      void this.refresh();
+      void this.refresh().then(() => this.pollRemoteRoots());
+      this.remotePollTimer = setInterval(() => void this.pollRemoteRoots(), 20_000);
     });
   }
 
@@ -121,6 +173,7 @@ export class DesktopSyncBackgroundService {
       }
     }
     if (this.lastUserId) void this.processPendingChanges();
+    if (this.lastUserId) void this.pollRemoteRoots();
   }
 
   setPeerSharing(meshEnabled: boolean, serveLocalFiles: boolean): void {
@@ -180,12 +233,28 @@ export class DesktopSyncBackgroundService {
       const response = await firstValueFrom(this.http.get<ApiResponse<Array<{
         id: string;
         p2pEnabled: boolean;
+        lanDiscoveryEnabled: boolean;
+        internetP2pEnabled: boolean;
+        relayAllowed: boolean;
         serveLocalFiles: boolean;
       }>>>(`${this.apiUrl}/devices`));
       const current = response.data.find((device) => device.id === deviceId);
-      this.setPeerSharing(!!current?.p2pEnabled, !!current?.serveLocalFiles);
+      const enabled = !!current?.p2pEnabled && (!!current.lanDiscoveryEnabled || !!current.internetP2pEnabled);
+      this.setPeerSharing(enabled, enabled && !!current?.serveLocalFiles);
+      if (!enabled) return;
+      const accessToken = this.auth.accessToken;
+      if (!accessToken) return;
+      const peers = await firstValueFrom(this.http.get<ApiResponse<Array<{ peerId: string }>>>(`${this.apiUrl}/devices/mesh-peers`));
+      await this.invoke<void>('configure_mesh_api', { apiUrl: this.apiUrl, accessToken });
+      await this.invoke<void>('set_trusted_mesh_peers', { peerIds: peers.data.map((peer) => peer.peerId) });
+      await this.invoke<void>('start_lan_mesh', {
+        lanDiscoveryEnabled: !!current?.lanDiscoveryEnabled,
+        internetP2pEnabled: !!current?.internetP2pEnabled,
+        relayAllowed: current?.relayAllowed ?? true,
+      });
     } catch {
       this.setPeerSharing(false, false);
+      await this.invoke<void>('stop_lan_mesh').catch(() => undefined);
     }
   }
 
@@ -269,6 +338,198 @@ export class DesktopSyncBackgroundService {
       this.syncStates.update((states) => ({ ...states, [key]: this.nativeError(error, 'No se pudo sincronizar este archivo.') }));
       return false;
     }
+  }
+
+  private async pollRemoteRoots(): Promise<void> {
+    if (this.remotePollInFlight || !this.lastUserId || !this.isDesktop()) return;
+    this.remotePollInFlight = true;
+    try {
+      const session = await firstValueFrom(this.auth.ensureSession());
+      const accessToken = this.auth.accessToken;
+      if (!session || !accessToken) return;
+      if (this.meshEnabled) {
+        await this.invoke<void>('configure_mesh_api', { apiUrl: this.apiUrl, accessToken }).catch(() => undefined);
+      }
+      const pending = await this.invoke<DesktopSyncChange[]>('get_pending_sync_changes', { limit: 500 });
+      for (const root of this.rootsState()) {
+        if (!root.remoteNodeId) continue;
+        try {
+          await this.pollRemoteRoot(root, pending, accessToken);
+        } catch {
+          // Retry this root on the next background interval without interrupting other roots.
+        }
+      }
+    } catch {
+      // Background polling is best-effort; a later interval retries when the API is available.
+    } finally {
+      this.remotePollInFlight = false;
+    }
+  }
+
+  private async pollRemoteRoot(
+    root: DesktopSyncRoot,
+    pending: DesktopSyncChange[],
+    accessToken: string,
+  ): Promise<void> {
+    const [manifest, files] = await Promise.all([
+      this.invoke<SyncManifestEntry[]>('get_sync_manifest', { rootId: root.id }),
+      this.listRemoteFiles(root.remoteNodeId!),
+    ]);
+    const entriesByRemotePath = new Map<string, SyncManifestEntry[]>();
+    for (const entry of manifest) {
+      const entries = entriesByRemotePath.get(entry.remotePath) ?? [];
+      entries.push(entry);
+      entriesByRemotePath.set(entry.remotePath, entries);
+    }
+    for (const { node, relativePath } of files) {
+      try {
+        if (!node.currentVersionId || ['UPLOADING', 'UNAVAILABLE', 'ERROR', 'DELETING'].includes(node.status)) continue;
+        const related = entriesByRemotePath.get(relativePath) ?? [];
+        if (related.some((entry) => entry.versionId === node.currentVersionId)) continue;
+        const protectedPaths = related.length ? related.map((entry) => entry.relativePath) : [relativePath];
+        if (pending.some((change) => change.rootId === root.id && protectedPaths.includes(change.relativePath))) continue;
+
+        const versions = await firstValueFrom(this.http.get<ApiResponse<RemoteFileVersion[]>>(
+          `${this.apiUrl}/virtual-drive/nodes/${node.id}/versions`,
+        ));
+        const version = versions.data.find((item) => item.id === node.currentVersionId);
+        if (!version || !Number.isSafeInteger(version.size) || version.size < 0 || !/^[a-f\d]{64}$/i.test(version.checksum)) continue;
+
+        const received = await this.receiveRemoteVersion(root, relativePath, node, version, accessToken);
+        if (received.receipt.status === 'deferred' || received.receipt.status === 'unchanged') continue;
+        const key = this.statusKey(root.id, received.receipt.relativePath);
+        const conflict = received.receipt.status === 'conflict';
+        const transport = received.transport === 'peer' ? 'desde otro dispositivo' : 'desde CloudFusion';
+        const notice = conflict
+          ? `KEEP_BOTH: se conservó el archivo local y la versión remota quedó en ${received.receipt.relativePath}.`
+          : `Versión remota recibida ${transport}: ${received.receipt.relativePath}.`;
+        this.syncStates.update((states) => ({ ...states, [key]: notice }));
+        this.syncNotice.set(notice);
+
+        if (this.meshEnabled && this.serveLocalFiles) {
+          void this.advertiseSyncedCopy({
+            rootId: root.id,
+            relativePath: received.receipt.relativePath,
+            remotePath: relativePath,
+            nodeId: node.id,
+            versionId: node.currentVersionId,
+            contentHash: version.checksum,
+            sizeBytes: String(version.size),
+            conflict,
+          }, key);
+        }
+      } catch (error) {
+        const key = this.statusKey(root.id, relativePath);
+        this.syncStates.update((states) => ({
+          ...states,
+          [key]: this.nativeError(error, 'No se pudo recibir la versión remota.'),
+        }));
+      }
+    }
+  }
+
+  private async listRemoteFiles(remoteRootId: string): Promise<Array<{ node: RemoteVirtualNode; relativePath: string }>> {
+    const pendingFolders = [{ id: remoteRootId, path: '', depth: 0 }];
+    const visited = new Set<string>([remoteRootId]);
+    const files: Array<{ node: RemoteVirtualNode; relativePath: string }> = [];
+    let nextFolder = 0;
+    while (nextFolder < pendingFolders.length) {
+      const folder = pendingFolders[nextFolder++];
+      if (folder.depth >= 64) continue;
+      const response = await firstValueFrom(this.http.get<ApiResponse<RemoteVirtualNode[]>>(
+        `${this.apiUrl}/virtual-drive/nodes/${folder.id}/children`,
+      ));
+      for (const node of response.data) {
+        const relativePath = folder.path ? `${folder.path}/${node.name}` : node.name;
+        if (node.type === 'FOLDER') {
+          if (!visited.has(node.id) && visited.size < 50_000) {
+            visited.add(node.id);
+            pendingFolders.push({ id: node.id, path: relativePath, depth: folder.depth + 1 });
+          }
+        } else if (node.type === 'FILE') {
+          files.push({ node, relativePath });
+          if (files.length >= 50_000) return files;
+        }
+      }
+    }
+    return files;
+  }
+
+  private async receiveRemoteVersion(
+    root: DesktopSyncRoot,
+    remotePath: string,
+    node: RemoteVirtualNode,
+    version: RemoteFileVersion,
+    accessToken: string,
+  ): Promise<{ receipt: RemoteSyncReceipt; transport: 'peer' | 'cloud' }> {
+    const stagingPath = await this.invoke<string>('get_sync_download_staging_path', {
+      rootId: root.id,
+      remotePath,
+      versionId: version.id,
+    });
+    const destinationDeviceId = this.auth.deviceId;
+    if (this.meshEnabled && destinationDeviceId) {
+      try {
+        const params = new HttpParams().set('nodeId', node.id).set('versionId', version.id);
+        const sources = await firstValueFrom(this.http.get<ApiResponse<P2pAvailability[]>>(
+          `${this.apiUrl}/p2p/availability`, { params },
+        ));
+        for (const source of sources.data.filter((item) => item.deviceId !== destinationDeviceId)) {
+          try {
+            const authorization = await firstValueFrom(this.http.post<ApiResponse<{
+              transfer: P2pTransferSession;
+              ticket: string;
+            }>>(`${this.apiUrl}/p2p/transfers/authorize`, {
+              sourceDeviceId: source.deviceId,
+              nodeId: node.id,
+              versionId: version.id,
+            }));
+            const { transfer, ticket } = authorization.data;
+            await this.invoke<string>('download_p2p_file', {
+              apiUrl: this.apiUrl,
+              accessToken,
+              transferId: transfer.id,
+              ticket,
+              sourcePeerId: source.peerId,
+              destinationDeviceId,
+              sourceDeviceId: transfer.sourceDeviceId,
+              nodeId: transfer.nodeId,
+              versionId: transfer.versionId,
+              contentHash: transfer.contentHash,
+              totalBytes: transfer.totalBytes,
+              destinationPath: stagingPath,
+            });
+            const receipt = await this.invoke<RemoteSyncReceipt>('install_sync_download', {
+              rootId: root.id,
+              remotePath,
+              nodeId: node.id,
+              versionId: version.id,
+              checksum: version.checksum,
+              sizeBytes: String(version.size),
+              versionNumber: version.versionNumber,
+              stagingPath,
+            });
+            return { receipt, transport: 'peer' };
+          } catch {
+            // Try another currently advertised peer, then use the verified cloud stream.
+          }
+        }
+      } catch {
+        // P2P discovery can be unavailable while the normal CloudFusion download still works.
+      }
+    }
+    const receipt = await this.invoke<RemoteSyncReceipt>('download_sync_version_from_cloud', {
+      rootId: root.id,
+      remotePath,
+      nodeId: node.id,
+      versionId: version.id,
+      checksum: version.checksum,
+      sizeBytes: String(version.size),
+      versionNumber: version.versionNumber,
+      apiUrl: this.apiUrl,
+      accessToken,
+    });
+    return { receipt, transport: 'cloud' };
   }
 
   private async advertiseSyncedCopy(receipt: SyncUploadReceipt, key: string): Promise<void> {
