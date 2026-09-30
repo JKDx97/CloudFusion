@@ -4,6 +4,7 @@ import { HttpClient } from '@angular/common/http';
 import { RouterLink } from '@angular/router';
 import { firstValueFrom } from 'rxjs';
 import { AuthService } from '../../core/auth/auth.service';
+import { DesktopSyncBackgroundService, DesktopSyncChange as SyncChange, DesktopSyncRoot as SyncRoot } from '../../core/sync/desktop-sync-background.service';
 import { environment } from '../../../environments/environment';
 import { ApiResponse } from '../../shared/models/api-response.model';
 
@@ -14,44 +15,12 @@ interface DesktopDeviceRegistration {
   clientVersion: string;
 }
 
-interface SyncRoot {
-  id: string;
-  path: string;
-  remoteNodeId?: string | null;
-}
-
-interface SyncChange {
-  id: string;
-  rootId: string;
-  relativePath: string;
-  operation: string;
-  detectedAtMs: number;
-}
-
 interface RemoteFolder {
   id: string;
   name: string;
   type: 'FILE' | 'FOLDER';
   parentId: string | null;
   isRoot: boolean;
-}
-
-interface SyncedNodeStatus {
-  status: string;
-  currentVersionId: string | null;
-}
-
-interface SyncUploadReceipt {
-  rootId: string;
-  relativePath: string;
-  remotePath: string;
-  nodeId: string;
-  versionId: string;
-  contentHash: string;
-  sizeBytes: string;
-  conflict: boolean;
-  unchanged: boolean;
-  warning?: string | null;
 }
 
 interface RegisteredDevice {
@@ -98,16 +67,17 @@ interface DesktopBridge extends Window {
 export class DesktopSyncComponent implements OnInit, OnDestroy {
   private readonly http = inject(HttpClient);
   private readonly authService = inject(AuthService);
+  private readonly syncCoordinator = inject(DesktopSyncBackgroundService);
   private readonly apiUrl = environment.apiUrl;
   readonly desktopAvailable = this.bridgeAvailable();
   readonly device = signal<DesktopDeviceRegistration | null>(null);
-  readonly roots = signal<SyncRoot[]>([]);
-  readonly changes = signal<SyncChange[]>([]);
+  readonly roots = this.syncCoordinator.roots;
+  readonly changes = this.syncCoordinator.changes;
   readonly remoteFolders = signal<Array<{ id: string; label: string }>>([]);
   readonly destinationsBusy = signal(false);
   readonly initialSyncBusy = signal<Record<string, boolean>>({});
-  readonly syncStates = signal<Record<string, string>>({});
-  readonly syncNotice = signal<string | null>(null);
+  readonly syncStates = this.syncCoordinator.syncStates;
+  readonly syncNotice = this.syncCoordinator.syncNotice;
   readonly indexedFileCount = signal<number | null>(null);
   readonly indexingBusy = signal(false);
   readonly indexNotice = signal<string | null>(null);
@@ -122,25 +92,15 @@ export class DesktopSyncComponent implements OnInit, OnDestroy {
   readonly meshPeers = signal<MeshPeer[]>([]);
   readonly meshPeerStatuses = signal<Record<string, string>>({});
   readonly meshStatus = signal('Desactivada');
-  private stopListening?: () => void;
   private stopMeshListening?: () => void;
   private stopStatusListening?: () => void;
-  private readonly debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
-  private uploadQueue: Promise<void> = Promise.resolve();
 
   ngOnInit(): void {
     if (!this.desktopAvailable) return;
+    this.syncCoordinator.start();
     void this.load();
     const events = (window as DesktopBridge).__TAURI__?.event;
     if (!events) return;
-    void events.listen<SyncChange>('sync-change', ({ payload }) => {
-      this.changes.update((items) => [payload, ...items.filter((item) => item.id !== payload.id)].slice(0, 100));
-      if (this.indexedFileCount() !== null) {
-        this.indexedFileCount.set(null);
-        this.indexNotice.set('Cambió una carpeta observada; vuelve a analizar las copias antes de usarlas.');
-      }
-      this.onLocalChange(payload);
-    }).then((stop) => (this.stopListening = stop));
     void events.listen<MeshPeerUpdate>('mesh-peer-update', ({ payload }) => {
       this.meshPeerStatuses.update((statuses) => ({ ...statuses, [payload.peerId]: payload.status }));
     }).then((stop) => (this.stopMeshListening = stop));
@@ -149,30 +109,19 @@ export class DesktopSyncComponent implements OnInit, OnDestroy {
   }
 
   ngOnDestroy(): void {
-    this.stopListening?.();
     this.stopMeshListening?.();
     this.stopStatusListening?.();
-    for (const timer of this.debounceTimers.values()) clearTimeout(timer);
-    this.debounceTimers.clear();
   }
 
   async load(): Promise<void> {
     try {
-      const [device, roots, changes] = await Promise.all([
-        this.invoke<DesktopDeviceRegistration>('get_device_registration'),
-        this.invoke<SyncRoot[]>('get_sync_roots'),
-        this.invoke<SyncChange[]>('get_pending_sync_changes', { limit: 500 }),
-      ]);
+      const device = await this.invoke<DesktopDeviceRegistration>('get_device_registration');
+      await this.syncCoordinator.refresh();
       this.device.set(device);
-      this.roots.set(roots);
-      this.changes.set(changes.reverse());
       this.error.set(null);
       await this.loadMeshConfiguration();
       try {
         await this.loadRemoteFolders();
-        const latest = new Map<string, SyncChange>();
-        for (const change of this.changes()) latest.set(`${change.rootId}\u0000${change.relativePath}`, change);
-        for (const change of latest.values()) this.onLocalChange(change, false);
       } catch {
         this.syncNotice.set('No se pudieron cargar las carpetas de Mi Drive. Comprueba tu conexión y vuelve a actualizar.');
       }
@@ -188,7 +137,7 @@ export class DesktopSyncComponent implements OnInit, OnDestroy {
       const path = await this.invoke<string | null>('choose_sync_folder');
       if (path) {
         const root = await this.invoke<SyncRoot>('add_sync_root', { path });
-        this.roots.update((roots) => [...roots, root]);
+        this.syncCoordinator.setRoots([...this.roots(), root]);
       }
     } catch (error) {
       this.error.set(typeof error === 'string' ? error : 'No se pudo agregar la carpeta.');
@@ -204,13 +153,11 @@ export class DesktopSyncComponent implements OnInit, OnDestroy {
         rootId: root.id,
         remoteNodeId,
       });
-      this.roots.update((roots) => roots.map((item) => item.id === updated.id ? updated : item));
+      const nextRoots = this.roots().map((item) => item.id === updated.id ? updated : item);
+      this.syncCoordinator.setRoots(nextRoots);
       this.syncNotice.set(remoteNodeId
         ? 'Destino guardado. Los cambios nuevos se subirán automáticamente; usa “Sincronizar ahora” para enviar los archivos que ya existían.'
         : 'Sincronización con la nube pausada para esta carpeta local.');
-      if (remoteNodeId) {
-        for (const change of this.changes().filter((item) => item.rootId === root.id)) this.onLocalChange(change);
-      }
     } catch (error) {
       this.error.set(this.nativeError(error, 'No se pudo guardar la carpeta de destino.'));
     }
@@ -228,9 +175,7 @@ export class DesktopSyncComponent implements OnInit, OnDestroy {
       let completed = 0;
       let failed = 0;
       for (const relativePath of files) {
-        const synchronized = await this.queueUpload({
-          id: '', rootId: root.id, relativePath, operation: 'modified', detectedAtMs: Date.now(),
-        });
+        const synchronized = await this.syncCoordinator.syncFile(root.id, relativePath);
         if (synchronized) completed += 1;
         else failed += 1;
         this.syncNotice.set(`Sincronizando archivos existentes: ${completed + failed} de ${files.length}…`);
@@ -248,18 +193,17 @@ export class DesktopSyncComponent implements OnInit, OnDestroy {
   }
 
   async retryChange(change: SyncChange): Promise<void> {
-    await this.queueUpload(change);
+    await this.syncCoordinator.retryChange(change);
   }
 
   canRetry(change: SyncChange): boolean {
-    const status = this.syncStatus(change.rootId, change.relativePath);
-    return !!status && !/^(Esperando|En cola|Subiendo|Sincronizado|Eliminación)/.test(status);
+    return this.syncCoordinator.canRetry(change);
   }
 
   async removeFolder(root: SyncRoot): Promise<void> {
     try {
       await this.invoke<void>('remove_sync_root', { id: root.id });
-      this.roots.update((roots) => roots.filter((item) => item.id !== root.id));
+      this.syncCoordinator.setRoots(this.roots().filter((item) => item.id !== root.id));
     } catch {
       this.error.set('No se pudo quitar la carpeta de este dispositivo.');
     }
@@ -341,6 +285,7 @@ export class DesktopSyncComponent implements OnInit, OnDestroy {
     this.internetP2pEnabled.set(internet);
     this.relayAllowed.set(relay);
     this.serveLocalFiles.set(!!current?.serveLocalFiles);
+    this.syncCoordinator.setPeerSharing(enabled, !!current?.serveLocalFiles);
     this.meshPeers.set(peers.data);
     await this.invoke<void>('set_trusted_mesh_peers', { peerIds: peers.data.map((peer) => peer.peerId) });
     if (enabled && startIfEnabled) {
@@ -389,123 +334,8 @@ export class DesktopSyncComponent implements OnInit, OnDestroy {
     }
   }
 
-  private onLocalChange(change: SyncChange, debounce = true): void {
-    const root = this.roots().find((item) => item.id === change.rootId);
-    if (!root?.remoteNodeId) return;
-    const key = `${change.rootId}\u0000${change.relativePath}`;
-    if (change.operation === 'deleted') {
-      this.syncStates.update((states) => ({ ...states, [key]: 'Eliminación detectada; el archivo remoto se conserva por seguridad.' }));
-      return;
-    }
-    if (!['created', 'modified', 'changed'].includes(change.operation)) return;
-    const oldTimer = this.debounceTimers.get(key);
-    if (oldTimer) clearTimeout(oldTimer);
-    this.syncStates.update((states) => ({ ...states, [key]: 'Esperando que termine el cambio…' }));
-    if (!debounce) {
-      void this.queueUpload(change);
-      return;
-    }
-    const timer = setTimeout(() => {
-      this.debounceTimers.delete(key);
-      void this.queueUpload(change);
-    }, 1200);
-    this.debounceTimers.set(key, timer);
-  }
-
   syncStatus(rootId: string, relativePath: string): string | null {
-    return this.syncStates()[`${rootId}\u0000${relativePath}`] ?? null;
-  }
-
-  private queueUpload(change: SyncChange): Promise<boolean> {
-    const key = `${change.rootId}\u0000${change.relativePath}`;
-    this.syncStates.update((states) => ({ ...states, [key]: 'En cola…' }));
-    const next = this.uploadQueue.then(() => this.uploadChange(change));
-    this.uploadQueue = next.then(() => undefined, () => undefined);
-    return next;
-  }
-
-  private async uploadChange(change: SyncChange): Promise<boolean> {
-    const key = `${change.rootId}\u0000${change.relativePath}`;
-    const root = this.roots().find((item) => item.id === change.rootId);
-    if (!root?.remoteNodeId) {
-      this.syncStates.update((states) => ({ ...states, [key]: 'Elige una carpeta de destino para activar la sincronización.' }));
-      return false;
-    }
-    if (change.operation === 'deleted') {
-      this.syncStates.update((states) => ({ ...states, [key]: 'Eliminación detectada; no se borra la copia de Mi Drive automáticamente.' }));
-      return false;
-    }
-    try {
-      const session = await firstValueFrom(this.authService.ensureSession());
-      const accessToken = this.authService.accessToken;
-      if (!session || !accessToken) throw new Error('La sesión venció. Inicia sesión otra vez para continuar.');
-      this.syncStates.update((states) => ({ ...states, [key]: 'Subiendo a Mi Drive…' }));
-      const receipt = await this.invoke<SyncUploadReceipt>('upload_sync_change', {
-        rootId: change.rootId,
-        relativePath: change.relativePath,
-        apiUrl: this.apiUrl,
-        accessToken,
-      });
-      let peerNotice = '';
-      if (this.meshEnabled() && this.serveLocalFiles()) {
-        peerNotice = ' Comprobando cuándo termina el guardado cloud para anunciar la copia P2P…';
-        void this.advertiseSyncedCopy(receipt, key);
-      }
-      const matchingChanges = this.changes().filter((item) =>
-        item.rootId === change.rootId && item.relativePath === change.relativePath && item.operation !== 'deleted',
-      );
-      for (const item of matchingChanges) await this.invoke<boolean>('acknowledge_sync_change', { id: item.id });
-      this.changes.update((items) => items.filter((item) => !matchingChanges.some((done) => done.id === item.id)));
-      const detail = receipt.conflict ? ' (copia en conflicto conservada)' : '';
-      this.syncStates.update((states) => ({ ...states, [key]: receipt.warning || `Sincronizado${detail}.${peerNotice}` }));
-      this.syncNotice.set(receipt.warning || `Archivo sincronizado: ${receipt.relativePath}${detail}.${peerNotice}`);
-      return true;
-    } catch (error) {
-      this.syncStates.update((states) => ({ ...states, [key]: this.nativeError(error, 'No se pudo sincronizar este archivo.') }));
-      return false;
-    }
-  }
-
-  private nativeError(error: unknown, fallback: string): string {
-    if (typeof error === 'string' && error.trim()) return error;
-    if (error instanceof Error && error.message) return error.message;
-    return fallback;
-  }
-
-  private async advertiseSyncedCopy(receipt: SyncUploadReceipt, statusKey: string): Promise<void> {
-    const retryDelays = [0, 1_000, 2_000, 4_000, 8_000, 15_000];
-    for (const delay of retryDelays) {
-      if (!this.meshEnabled() || !this.serveLocalFiles()) return;
-      if (delay) await new Promise<void>((resolve) => setTimeout(resolve, delay));
-      try {
-        const nodeResponse = await firstValueFrom(this.http.get<ApiResponse<SyncedNodeStatus>>(
-          `${this.apiUrl}/virtual-drive/nodes/${receipt.nodeId}`,
-        ));
-        const node = nodeResponse.data;
-        if (node.currentVersionId !== receipt.versionId) {
-          this.setP2pSyncNotice(statusKey, 'La versión cambió antes de anunciarse; la copia cloud sigue sincronizada.');
-          return;
-        }
-        if (node.status === 'UNAVAILABLE' || node.status === 'ERROR') break;
-        if (node.status !== 'AVAILABLE') continue;
-        await firstValueFrom(this.http.post<ApiResponse<unknown>>(`${this.apiUrl}/p2p/availability`, {
-          nodeId: receipt.nodeId,
-          versionId: receipt.versionId,
-          contentHash: receipt.contentHash,
-          sizeBytes: receipt.sizeBytes,
-        }));
-        this.setP2pSyncNotice(statusKey, 'La copia local verificada está disponible para tus otros dispositivos.');
-        return;
-      } catch {
-        // Provider replication and the API can be briefly busy after an upload; retry within the ticket/lease setup window.
-      }
-    }
-    this.setP2pSyncNotice(statusKey, 'La copia cloud quedó guardada, pero todavía no se pudo anunciar como fuente P2P.');
-  }
-
-  private setP2pSyncNotice(statusKey: string, message: string): void {
-    this.syncStates.update((states) => ({ ...states, [statusKey]: `Sincronizado. ${message}` }));
-    this.syncNotice.set(message);
+    return this.syncCoordinator.syncStatus(rootId, relativePath);
   }
 
   async updateLocalFileServing(event: Event): Promise<void> {
@@ -518,6 +348,7 @@ export class DesktopSyncComponent implements OnInit, OnDestroy {
         { serveLocalFiles: enabled },
       ));
       this.serveLocalFiles.set(enabled);
+      this.syncCoordinator.setPeerSharing(this.meshEnabled(), enabled);
       this.meshStatus.set(enabled
         ? 'Este dispositivo puede ofrecer copias verificadas a tus otros equipos.'
         : 'Este dispositivo ya no ofrece archivos a otros equipos.');
@@ -528,6 +359,12 @@ export class DesktopSyncComponent implements OnInit, OnDestroy {
 
   private bridgeAvailable(): boolean {
     return typeof window !== 'undefined' && !!(window as DesktopBridge).__TAURI__?.core?.invoke;
+  }
+
+  private nativeError(error: unknown, fallback: string): string {
+    if (typeof error === 'string' && error.trim()) return error;
+    if (error instanceof Error && error.message) return error.message;
+    return fallback;
   }
 
   private invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
