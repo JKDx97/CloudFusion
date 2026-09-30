@@ -1,0 +1,80 @@
+<main class="min-h-screen bg-[#f7f8fc] px-5 py-8 text-slate-900 lg:px-10">
+  <div class="mx-auto max-w-5xl space-y-6">
+    <nav class="flex flex-wrap items-center justify-between gap-3">
+      <a routerLink="/drive" class="text-sm font-semibold text-indigo-600 hover:text-indigo-800">← Volver a Mi Drive</a>
+      <a routerLink="/settings/device-sync" class="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-700">Sincronización Desktop</a>
+    </nav>
+
+    <header>
+      <p class="text-sm font-semibold uppercase tracking-[0.18em] text-indigo-600">Configuración</p>
+      <h1 class="mt-2 text-3xl font-semibold tracking-tight text-slate-950">Dispositivos</h1>
+      <p class="mt-2 max-w-3xl text-sm leading-6 text-slate-600">Administra los equipos vinculados y empareja un NAS o servidor sin interfaz gráfica.</p>
+    </header>
+
+    @if (error()) {
+      <div role="alert" class="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">{{ error() }}</div>
+    }
+    @if (notice()) {
+      <div role="status" class="rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">{{ notice() }}</div>
+    }
+
+    <section class="rounded-2xl border border-indigo-100 bg-white p-5 shadow-sm sm:p-6">
+      <div class="flex flex-wrap items-start justify-between gap-4">
+        <div class="max-w-2xl">
+          <h2 class="text-lg font-semibold text-slate-950">Emparejar NAS o CloudFusion Node</h2>
+          <p class="mt-2 text-sm leading-6 text-slate-600">Genera un código de un solo uso desde esta sesión y escríbelo en el nodo. Dura cinco minutos y crea una sesión ligada a la identidad criptográfica de ese dispositivo.</p>
+        </div>
+        <button type="button" class="rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50" [disabled]="creatingCode()" (click)="createPairingCode()">
+          {{ creatingCode() ? 'Generando…' : 'Generar código' }}
+        </button>
+      </div>
+
+      @if (pairingCode(); as pairing) {
+        <div class="mt-5 rounded-xl border border-indigo-100 bg-indigo-50/70 p-4 sm:flex sm:items-center sm:justify-between sm:gap-4">
+          <div>
+            <p class="text-xs font-semibold uppercase tracking-wider text-indigo-700">Código temporal · caduca {{ pairing.expiresAt | date:'shortTime' }}</p>
+            <p class="mt-2 select-all font-mono text-xl font-bold tracking-[0.12em] text-slate-950 sm:text-2xl">{{ pairing.code }}</p>
+            <p class="mt-2 text-xs text-slate-600">No lo publiques ni lo compartas con un dispositivo que no controles. No se volverá a mostrar después de salir de esta página.</p>
+          </div>
+          <button type="button" class="mt-4 rounded-lg border border-indigo-200 bg-white px-4 py-2 text-sm font-semibold text-indigo-700 hover:bg-indigo-100 sm:mt-0" (click)="copyPairingCode()">Copiar código</button>
+        </div>
+      }
+    </section>
+
+    <section class="overflow-hidden rounded-2xl border border-slate-200/80 bg-white shadow-sm">
+      <div class="flex items-center justify-between gap-3 border-b border-slate-100 px-5 py-4">
+        <div>
+          <h2 class="font-semibold text-slate-950">Equipos vinculados</h2>
+          <p class="mt-1 text-xs text-slate-500">No se muestran claves privadas ni direcciones de red.</p>
+        </div>
+        <button type="button" class="text-sm font-semibold text-indigo-600" [disabled]="loading()" (click)="loadDevices()">Actualizar</button>
+      </div>
+
+      @if (loading()) {
+        <p class="p-8 text-center text-sm text-slate-500">Cargando dispositivos…</p>
+      } @else if (devices().length === 0) {
+        <p class="p-8 text-center text-sm text-slate-500">Aún no hay dispositivos registrados.</p>
+      } @else {
+        @for (device of devices(); track device.id) {
+          <article class="flex flex-wrap items-center justify-between gap-4 border-b border-slate-100 px-5 py-4 last:border-0">
+            <div class="min-w-0">
+              <div class="flex flex-wrap items-center gap-2">
+                <h3 class="font-semibold text-slate-900">{{ device.name }}</h3>
+                <span class="rounded-full px-2 py-0.5 text-[11px] font-semibold" [class.bg-emerald-50]="!device.revokedAt" [class.text-emerald-700]="!device.revokedAt" [class.bg-slate-100]="!!device.revokedAt" [class.text-slate-500]="!!device.revokedAt">{{ device.revokedAt ? 'Revocado' : device.platform }}</span>
+              </div>
+              <p class="mt-1 text-xs text-slate-500">{{ device.clientVersion ? 'CloudFusion ' + device.clientVersion + ' · ' : '' }}Última actividad: {{ device.lastSeenAt ? (device.lastSeenAt | date:'medium') : 'sin actividad registrada' }}</p>
+              @if (!device.revokedAt) {
+                <p class="mt-1 text-xs text-slate-500">P2P {{ device.p2pEnabled ? 'activado' : 'desactivado' }} · Aporta almacenamiento {{ device.storageContributionEnabled ? 'activado' : 'desactivado' }}</p>
+              }
+            </div>
+            @if (!device.revokedAt && device.id !== currentDeviceId) {
+              <button type="button" class="rounded-lg border border-rose-200 px-3 py-2 text-xs font-semibold text-rose-700 hover:bg-rose-50 disabled:opacity-50" [disabled]="revokingDevice() !== null" (click)="revoke(device)">
+                {{ revokingDevice() === device.id ? 'Revocando…' : 'Revocar acceso' }}
+              </button>
+            }
+          </article>
+        }
+      }
+    </section>
+  </div>
+</main>
