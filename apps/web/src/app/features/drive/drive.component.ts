@@ -9,6 +9,7 @@ import { CloudService } from '../../core/cloud/cloud.service';
 import { environment } from '../../../environments/environment';
 import { CreatePublicShareResult, CreateShareInvitationResult, FileVersionRecord, PublicShareExpiry, PublicSharePermission, PublicShareRecord, ResourceShareRecord, ResourceShareRole, ShareInvitationRecord, ShareUser, VirtualNode } from '../../shared/models/cloud.model';
 import { ApiResponse } from '../../shared/models/api-response.model';
+import { TransferPathSelector } from './transfer-path-selector';
 
 type DriveSection = 'drive' | 'recent' | 'favorites' | 'shared' | 'trash';
 interface P2pAvailability {
@@ -19,6 +20,12 @@ interface P2pAvailability {
   lastVerifiedAt: string;
   expiresAt: string;
   advertisedSize: string;
+}
+
+interface P2pMeshPeerUpdate {
+  peerId: string;
+  status: string;
+  multiaddr: string | null;
 }
 
 interface P2pTransferSession {
@@ -36,6 +43,7 @@ interface P2pTransferProgress {
   bytesTransferred: string;
   totalBytes: string;
   status: string;
+  transport?: string;
 }
 
 interface RegisteredP2pDevice {
@@ -71,6 +79,7 @@ export class DriveComponent implements OnInit {
   private readonly apiUrl = environment.apiUrl;
   private readonly router = inject(Router);
   private readonly destroyRef = inject(DestroyRef);
+  private readonly transferPathSelector = new TransferPathSelector();
   readonly nodes = signal<VirtualNode[]>([]);
   readonly breadcrumbs = signal<VirtualNode[]>([]);
   readonly root = signal<VirtualNode | null>(null);
@@ -110,6 +119,8 @@ export class DriveComponent implements OnInit {
   readonly p2pLookupVersion = signal<string | null>(null);
   readonly p2pBusyVersion = signal<string | null>(null);
   readonly p2pProgress = signal<P2pTransferProgress | null>(null);
+  readonly meshPeerStatuses = signal<Record<string, string>>({});
+  private meshPeerListenerReady: Promise<void> | null = null;
 
   ngOnInit(): void {
     this.openDrive();
@@ -137,7 +148,7 @@ export class DriveComponent implements OnInit {
       }));
       this.announce(`v${version.versionNumber} está disponible para tus otros dispositivos durante un tiempo limitado.`);
     } catch {
-      this.fail('No se pudo anunciar esta copia. Activa LAN segura y el permiso para compartir archivos en Sincronización Desktop.');
+      this.fail('No se pudo anunciar esta copia. Activa la conexión entre dispositivos y el permiso para compartir archivos en Sincronización Desktop.');
     }
   }
 
@@ -146,11 +157,7 @@ export class DriveComponent implements OnInit {
     if (!target) return;
     this.p2pLookupVersion.set(version.id);
     try {
-      const params = new HttpParams().set('nodeId', target.id).set('versionId', version.id);
-      const response = await firstValueFrom(this.http.get<ApiResponse<P2pAvailability[]>>(
-        `${this.apiUrl}/p2p/availability`, { params },
-      ));
-      const otherDevices = response.data.filter((source) => source.deviceId !== this.auth.deviceId);
+      const otherDevices = await this.fetchP2pSources(target.id, version.id);
       this.p2pSources.update((sources) => ({ ...sources, [version.id]: otherDevices }));
       if (!otherDevices.length) this.announce('Ningún otro dispositivo ofrece esta versión ahora.');
     } catch {
@@ -160,69 +167,127 @@ export class DriveComponent implements OnInit {
     }
   }
 
-  async downloadFromP2p(version: FileVersionRecord, source: P2pAvailability): Promise<void> {
+  async downloadAutomatically(version: FileVersionRecord): Promise<void> {
     const target = this.versionTarget();
     const destinationDeviceId = this.auth.deviceId;
     const accessToken = this.auth.accessToken;
     if (!target || !destinationDeviceId || !accessToken || !this.desktopSyncAvailable) {
-      this.fail('Inicia sesión en CloudFusion Desktop y activa LAN segura para recibir archivos P2P.');
+      this.fail('Inicia sesión en CloudFusion Desktop y activa la conexión entre dispositivos para usar la descarga inteligente.');
       return;
     }
     this.p2pBusyVersion.set(version.id);
     try {
-      const destinationPath = await this.invokeDesktop<string | null>('choose_p2p_destination', {
-        fileName: `${target.name}.v${version.versionNumber}`,
-      });
-      if (!destinationPath) return;
-      const authorization = await firstValueFrom(this.http.post<ApiResponse<{
-        transfer: P2pTransferSession;
-        ticket: string;
-      }>>(`${this.apiUrl}/p2p/transfers/authorize`, {
-        sourceDeviceId: source.deviceId,
-        nodeId: target.id,
-        versionId: version.id,
-      }));
-      const { transfer, ticket } = authorization.data;
+      let sources: P2pAvailability[] = [];
+      try {
+        sources = await this.fetchP2pSources(target.id, version.id);
+      } catch {
+        // A failed peer lookup still permits the existing, permission-checked cloud download.
+      }
+      this.p2pSources.update((current) => ({ ...current, [version.id]: sources }));
+
+      const orderedSources = this.transferPathSelector.orderSources(sources, this.meshPeerStatuses());
+      if (orderedSources.length) {
+        const destinationPath = await this.invokeDesktop<string | null>('choose_p2p_destination', {
+          fileName: `${target.name}.v${version.versionNumber}`,
+        });
+        if (!destinationPath) return;
+        for (const source of orderedSources) {
+          try {
+            await this.tryP2pDownload(version, target.id, source, destinationPath, destinationDeviceId, accessToken);
+            this.announce(`Versión verificada recibida por ${this.peerRouteLabel(source.peerId)} y guardada en ${destinationPath}.`);
+            return;
+          } catch {
+            // Try the next authorized local copy before using the cloud replica.
+          }
+        }
+      }
+
+      const progressId = `cloud-${version.id}-${Date.now()}`;
       this.p2pProgress.set({
-        transferId: transfer.id,
+        transferId: progressId,
         bytesTransferred: '0',
-        totalBytes: transfer.totalBytes,
-        status: 'AUTHORIZED',
+        totalBytes: String(version.size),
+        status: 'CLOUD_FALLBACK',
+        transport: 'CLOUD_FALLBACK',
       });
-      await this.invokeDesktop<string>('download_p2p_file', {
-        apiUrl: this.apiUrl,
-        accessToken,
-        transferId: transfer.id,
-        ticket,
-        sourcePeerId: source.peerId,
-        destinationDeviceId,
-        sourceDeviceId: transfer.sourceDeviceId,
-        nodeId: transfer.nodeId,
-        versionId: transfer.versionId,
-        contentHash: transfer.contentHash,
-        totalBytes: transfer.totalBytes,
-        destinationPath,
-      });
-      this.announce(`Descarga P2P verificada y guardada en ${destinationPath}.`);
-    } catch {
-      this.p2pProgress.update((progress) => progress ? { ...progress, status: 'CLOUD_FALLBACK' } : null);
       try {
         const blob = await firstValueFrom(this.cloud.downloadFileVersion(target.id, version.id));
         this.saveDownload(blob, `${target.name}.v${version.versionNumber}`);
-        this.p2pProgress.update((progress) => progress ? {
-          ...progress,
-          bytesTransferred: progress.totalBytes,
+        this.p2pProgress.update((progress) => ({
+          transferId: progress?.transferId ?? progressId,
+          bytesTransferred: String(version.size),
+          totalBytes: String(version.size),
           status: 'CLOUD_FALLBACK_COMPLETED',
-        } : null);
-        this.announce('La conexión directa no estuvo disponible; se descargó la versión desde CloudFusion.');
+          transport: 'CLOUD_FALLBACK',
+        }));
+        this.announce(orderedSources.length
+          ? 'Las rutas entre dispositivos no estuvieron disponibles; CloudFusion descargó la versión autorizada desde la nube.'
+          : 'Ningún dispositivo anunció una copia local; CloudFusion descargó la versión autorizada desde la nube.');
       } catch {
-        this.fail('No se pudo completar la descarga P2P ni recuperar una copia desde CloudFusion.');
+        this.p2pProgress.update((progress) => progress ? { ...progress, status: 'CLOUD_FALLBACK_FAILED' } : null);
+        this.fail('No se pudo recibir el archivo desde los dispositivos ni recuperar su réplica cloud.');
       }
+    } catch {
+      this.fail('No se pudo iniciar la descarga. Comprueba CloudFusion Desktop y vuelve a intentarlo.');
     } finally {
       this.p2pBusyVersion.set(null);
     }
   }
 
+  private async fetchP2pSources(nodeId: string, versionId: string): Promise<P2pAvailability[]> {
+    const params = new HttpParams().set('nodeId', nodeId).set('versionId', versionId);
+    const response = await firstValueFrom(this.http.get<ApiResponse<P2pAvailability[]>>(
+      `${this.apiUrl}/p2p/availability`, { params },
+    ));
+    return response.data.filter((source) => source.deviceId !== this.auth.deviceId);
+  }
+
+  private async tryP2pDownload(
+    version: FileVersionRecord,
+    nodeId: string,
+    source: P2pAvailability,
+    destinationPath: string,
+    destinationDeviceId: string,
+    accessToken: string,
+  ): Promise<void> {
+    const authorization = await firstValueFrom(this.http.post<ApiResponse<{
+      transfer: P2pTransferSession;
+      ticket: string;
+    }>>(`${this.apiUrl}/p2p/transfers/authorize`, {
+      sourceDeviceId: source.deviceId,
+      nodeId,
+      versionId: version.id,
+    }));
+    const { transfer, ticket } = authorization.data;
+    this.p2pProgress.set({
+      transferId: transfer.id,
+      bytesTransferred: '0',
+      totalBytes: transfer.totalBytes,
+      status: 'AUTHORIZED',
+    });
+    await this.invokeDesktop<string>('download_p2p_file', {
+      apiUrl: this.apiUrl,
+      accessToken,
+      transferId: transfer.id,
+      ticket,
+      sourcePeerId: source.peerId,
+      destinationDeviceId,
+      sourceDeviceId: transfer.sourceDeviceId,
+      nodeId: transfer.nodeId,
+      versionId: transfer.versionId,
+      contentHash: transfer.contentHash,
+      totalBytes: transfer.totalBytes,
+      destinationPath,
+    });
+  }
+
+  private peerRouteLabel(peerId: string): string {
+    const status = this.meshPeerStatuses()[peerId] ?? '';
+    if (status === 'connected:LAN_DIRECT') return 'LAN directa';
+    if (status === 'connected:P2P_DIRECT') return 'P2P directa';
+    if (status === 'connected:P2P_RELAY') return 'relay P2P';
+    return 'la conexión P2P disponible';
+  }
 
   openDrive(): void {
     this.section.set('drive');
@@ -301,6 +366,8 @@ export class DriveComponent implements OnInit {
   openVersions(node: VirtualNode): void {
     this.versionTarget.set(node);
     this.versionComment.set('');
+    this.p2pSources.set({});
+    this.p2pProgress.set(null);
     this.versionLoading.set(true);
     this.cloud.getFileVersions(node.id).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
       next: (versions) => { this.versions.set(versions); this.versionLoading.set(false); },
@@ -651,6 +718,11 @@ export class DriveComponent implements OnInit {
     void events.listen<P2pTransferProgress>('p2p-transfer-progress', ({ payload }) => {
       if (this.p2pProgress()?.transferId === payload.transferId) this.p2pProgress.set(payload);
     }).then((stop) => this.destroyRef.onDestroy(stop));
+    this.meshPeerListenerReady = events.listen<P2pMeshPeerUpdate>('mesh-peer-update', ({ payload }) => {
+      this.meshPeerStatuses.update((statuses) => ({ ...statuses, [payload.peerId]: payload.status }));
+    }).then((stop) => {
+      this.destroyRef.onDestroy(stop);
+    }).catch(() => undefined);
   }
 
   private async startMeshForActiveDesktopDevice(): Promise<void> {
@@ -658,6 +730,7 @@ export class DriveComponent implements OnInit {
     const accessToken = this.auth.accessToken;
     if (!this.desktopSyncAvailable || !deviceId || !accessToken) return;
     try {
+      await this.meshPeerListenerReady;
       const [devices, peers] = await Promise.all([
         firstValueFrom(this.http.get<ApiResponse<RegisteredP2pDevice[]>>(`${this.apiUrl}/devices`)),
         firstValueFrom(this.http.get<ApiResponse<TrustedP2pPeer[]>>(`${this.apiUrl}/devices/mesh-peers`)),
