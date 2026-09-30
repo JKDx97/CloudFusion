@@ -45,6 +45,7 @@ fn main() {
             sync::upload_sync_change,
             sync::index_sync_files,
             sync::has_indexed_file_version,
+            sync::verify_sync_file_copy,
             transfer::choose_p2p_destination,
             transfer::download_p2p_file
         ])

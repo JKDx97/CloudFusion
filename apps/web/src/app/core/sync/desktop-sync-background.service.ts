@@ -20,6 +20,7 @@ export interface DesktopSyncChange {
 }
 
 interface SyncUploadReceipt {
+  rootId: string;
   relativePath: string;
   nodeId: string;
   versionId: string;
@@ -27,6 +28,10 @@ interface SyncUploadReceipt {
   sizeBytes: string;
   conflict: boolean;
   warning?: string | null;
+}
+
+interface AvailabilityLease {
+  expiresAt: string;
 }
 
 interface SyncedNodeStatus {
@@ -57,6 +62,8 @@ export class DesktopSyncBackgroundService {
   private serveLocalFiles = false;
   private uploadQueue: Promise<void> = Promise.resolve();
   private readonly debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly advertisedCopies = new Map<string, SyncUploadReceipt>();
+  private readonly availabilityTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(
     private readonly http: HttpClient,
@@ -72,10 +79,13 @@ export class DesktopSyncBackgroundService {
 
     this.auth.currentUser$.subscribe((user) => {
       if (!user) {
+        this.withdrawAllCopies(true);
+        this.rootsState.set([]);
         this.lastUserId = null;
         return;
       }
       if (user.id === this.lastUserId) return;
+      if (this.lastUserId && this.lastUserId !== user.id) this.withdrawAllCopies(true);
       this.lastUserId = user.id;
       void this.refresh();
     });
@@ -93,6 +103,7 @@ export class DesktopSyncBackgroundService {
   }
 
   setRoots(roots: DesktopSyncRoot[]): void {
+    const previousRoots = this.rootsState();
     this.rootsState.set(roots);
     const configuredIds = new Set(roots.filter((root) => root.remoteNodeId).map((root) => root.id));
     for (const [key, timer] of this.debounceTimers) {
@@ -102,12 +113,26 @@ export class DesktopSyncBackgroundService {
         this.debounceTimers.delete(key);
       }
     }
+    for (const [key, receipt] of this.advertisedCopies) {
+      const oldRoot = previousRoots.find((root) => root.id === receipt.rootId);
+      const newRoot = roots.find((root) => root.id === receipt.rootId);
+      if (!configuredIds.has(receipt.rootId) || oldRoot?.remoteNodeId !== newRoot?.remoteNodeId) {
+        this.withdrawCopy(key, receipt, true);
+      }
+    }
     if (this.lastUserId) void this.processPendingChanges();
   }
 
   setPeerSharing(meshEnabled: boolean, serveLocalFiles: boolean): void {
+    const wasServing = this.meshEnabled && this.serveLocalFiles;
     this.meshEnabled = meshEnabled;
     this.serveLocalFiles = serveLocalFiles;
+    const isServing = meshEnabled && serveLocalFiles;
+    if (wasServing && !isServing) {
+      for (const [key, receipt] of this.advertisedCopies) this.withdrawCopy(key, receipt, false);
+    } else if (!wasServing && isServing) {
+      for (const [key, receipt] of this.advertisedCopies) void this.publishAvailability(key, receipt, false);
+    }
   }
 
   syncFile(rootId: string, relativePath: string): Promise<boolean> {
@@ -170,10 +195,12 @@ export class DesktopSyncBackgroundService {
     if (!root?.remoteNodeId) return;
     const key = this.statusKey(change.rootId, change.relativePath);
     if (change.operation === 'deleted') {
+      this.withdrawCopiesForPath(change.rootId, change.relativePath);
       this.syncStates.update((states) => ({ ...states, [key]: 'Eliminación detectada; la copia de Mi Drive se conserva por seguridad.' }));
       return;
     }
     if (!['created', 'modified', 'changed'].includes(change.operation)) return;
+    this.withdrawCopiesForPath(change.rootId, change.relativePath);
     const oldTimer = this.debounceTimers.get(key);
     if (oldTimer) clearTimeout(oldTimer);
     this.syncStates.update((states) => ({ ...states, [key]: 'Esperando que termine el cambio…' }));
@@ -260,19 +287,128 @@ export class DesktopSyncBackgroundService {
         }
         if (node.status === 'UNAVAILABLE' || node.status === 'ERROR') break;
         if (node.status !== 'AVAILABLE') continue;
-        await firstValueFrom(this.http.post<ApiResponse<unknown>>(`${this.apiUrl}/p2p/availability`, {
-          nodeId: receipt.nodeId,
-          versionId: receipt.versionId,
-          contentHash: receipt.contentHash,
-          sizeBytes: receipt.sizeBytes,
-        }));
-        this.setPeerNotice(key, 'La copia local verificada está disponible para tus otros dispositivos.');
+        this.advertisedCopies.set(this.availabilityKey(receipt), receipt);
+        await this.publishAvailability(this.availabilityKey(receipt), receipt, true);
         return;
       } catch {
         // Retry brief API/provider replication delays without failing the saved cloud copy.
       }
     }
     this.setPeerNotice(key, 'La copia cloud quedó guardada, pero todavía no se pudo anunciar como fuente P2P.');
+  }
+
+  private async publishAvailability(key: string, receipt: SyncUploadReceipt, announce: boolean): Promise<void> {
+    if (!this.meshEnabled || !this.serveLocalFiles) return;
+    this.advertisedCopies.set(key, receipt);
+    try {
+      const hasLocalCopy = await this.invoke<boolean>('verify_sync_file_copy', {
+        rootId: receipt.rootId,
+        relativePath: receipt.relativePath,
+        contentHash: receipt.contentHash,
+        sizeBytes: receipt.sizeBytes,
+      });
+      if (!hasLocalCopy) {
+        this.withdrawCopy(key, receipt, true);
+        if (announce) this.setPeerNotice(this.statusKey(receipt.rootId, receipt.relativePath), 'La copia local ya no coincide con la versión anunciada; no se compartirá por P2P.');
+        return;
+      }
+      if (this.advertisedCopies.get(key) !== receipt || !this.meshEnabled || !this.serveLocalFiles) return;
+      const response = await firstValueFrom(this.http.post<ApiResponse<AvailabilityLease>>(
+        `${this.apiUrl}/p2p/availability`,
+        {
+          nodeId: receipt.nodeId,
+          versionId: receipt.versionId,
+          contentHash: receipt.contentHash,
+          sizeBytes: receipt.sizeBytes,
+        },
+      ));
+      this.scheduleAvailabilityRenewal(key, receipt, response.data.expiresAt);
+      if (announce) this.setPeerNotice(this.statusKey(receipt.rootId, receipt.relativePath), 'La copia local verificada está disponible para tus otros dispositivos.');
+    } catch {
+      this.scheduleAvailabilityRenewal(key, receipt, undefined, 30_000);
+      if (announce) this.setPeerNotice(this.statusKey(receipt.rootId, receipt.relativePath), 'La copia cloud quedó guardada; se reintentará anunciar la fuente P2P.');
+    }
+  }
+
+  private scheduleAvailabilityRenewal(
+    key: string,
+    receipt: SyncUploadReceipt,
+    expiresAt?: string,
+    retryDelay?: number,
+  ): void {
+    const existing = this.availabilityTimers.get(key);
+    if (existing) clearTimeout(existing);
+    const remaining = expiresAt ? Date.parse(expiresAt) - Date.now() : Number.NaN;
+    const delay = retryDelay ?? (Number.isFinite(remaining) ? Math.max(15_000, Math.floor(remaining / 2)) : 7 * 60_000);
+    const timer = setTimeout(() => {
+      this.availabilityTimers.delete(key);
+      void this.renewAvailability(key, receipt);
+    }, delay);
+    this.availabilityTimers.set(key, timer);
+  }
+
+  private async renewAvailability(key: string, receipt: SyncUploadReceipt): Promise<void> {
+    if (this.advertisedCopies.get(key) !== receipt || !this.meshEnabled || !this.serveLocalFiles) return;
+    try {
+      const hasLocalCopy = await this.invoke<boolean>('verify_sync_file_copy', {
+        rootId: receipt.rootId,
+        relativePath: receipt.relativePath,
+        contentHash: receipt.contentHash,
+        sizeBytes: receipt.sizeBytes,
+      });
+      if (!hasLocalCopy) {
+        this.withdrawCopy(key, receipt, true);
+        return;
+      }
+      const response = await firstValueFrom(this.http.get<ApiResponse<SyncedNodeStatus>>(
+        `${this.apiUrl}/virtual-drive/nodes/${receipt.nodeId}`,
+      ));
+      if (this.advertisedCopies.get(key) !== receipt || !this.meshEnabled || !this.serveLocalFiles) return;
+      if (response.data.currentVersionId !== receipt.versionId) {
+        this.withdrawCopy(key, receipt, true);
+        this.syncStates.update((states) => ({
+          ...states,
+          [this.statusKey(receipt.rootId, receipt.relativePath)]: 'La versión remota cambió; se retiró la fuente P2P anterior.',
+        }));
+        return;
+      }
+      const lease = await firstValueFrom(this.http.post<ApiResponse<AvailabilityLease>>(
+        `${this.apiUrl}/p2p/availability`,
+        {
+          nodeId: receipt.nodeId,
+          versionId: receipt.versionId,
+          contentHash: receipt.contentHash,
+          sizeBytes: receipt.sizeBytes,
+        },
+      ));
+      this.scheduleAvailabilityRenewal(key, receipt, lease.data.expiresAt);
+    } catch {
+      this.scheduleAvailabilityRenewal(key, receipt, undefined, 30_000);
+    }
+  }
+
+  private withdrawCopiesForPath(rootId: string, relativePath: string): void {
+    for (const [key, receipt] of this.advertisedCopies) {
+      if (receipt.rootId === rootId && receipt.relativePath === relativePath) this.withdrawCopy(key, receipt, true);
+    }
+  }
+
+  private withdrawAllCopies(forget: boolean): void {
+    for (const [key, receipt] of this.advertisedCopies) this.withdrawCopy(key, receipt, forget);
+  }
+
+  private withdrawCopy(key: string, receipt: SyncUploadReceipt, forget: boolean): void {
+    const timer = this.availabilityTimers.get(key);
+    if (timer) clearTimeout(timer);
+    this.availabilityTimers.delete(key);
+    if (forget) this.advertisedCopies.delete(key);
+    void firstValueFrom(this.http.delete<ApiResponse<{ withdrawn: boolean }>>(
+      `${this.apiUrl}/p2p/availability/${receipt.nodeId}/${receipt.versionId}`,
+    )).catch(() => undefined);
+  }
+
+  private availabilityKey(receipt: SyncUploadReceipt): string {
+    return `${receipt.nodeId}\u0000${receipt.versionId}`;
   }
 
   private setPeerNotice(key: string, message: string): void {

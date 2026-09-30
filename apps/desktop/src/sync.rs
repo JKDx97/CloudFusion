@@ -346,6 +346,26 @@ fn resolve_sync_file(root_path: &str, relative_path: &str) -> Result<PathBuf, St
     Ok(current)
 }
 
+fn sync_file_matches(
+    root_path: &str,
+    relative_path: &str,
+    expected_hash: &str,
+    expected_size: u64,
+) -> bool {
+    let Ok(path) = resolve_sync_file(root_path, relative_path) else {
+        return false;
+    };
+    let Ok(metadata) = fs::metadata(&path) else {
+        return false;
+    };
+    if metadata.len() != expected_size {
+        return false;
+    }
+    hash_file(&path)
+        .map(|hash| hash.eq_ignore_ascii_case(expected_hash))
+        .unwrap_or(false)
+}
+
 fn collect_sync_files(
     root: &Path,
     directory: &Path,
@@ -419,6 +439,34 @@ pub async fn has_indexed_file_version(
         }
         let actual_hash = hash_file(&path)?;
         Ok(actual_hash.eq_ignore_ascii_case(&content_hash))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn verify_sync_file_copy(
+    root_id: String,
+    relative_path: String,
+    content_hash: String,
+    size_bytes: String,
+    state: State<'_, SyncState>,
+) -> Result<bool, String> {
+    Uuid::parse_str(&root_id).map_err(|_| "The sync folder identifier is invalid".to_owned())?;
+    if content_hash.len() != 64 || !content_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("File checksum is invalid".to_owned());
+    }
+    let size_bytes = size_bytes
+        .parse::<u64>()
+        .map_err(|_| "File size is invalid".to_owned())?;
+    let root = state.get_root(&root_id)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(sync_file_matches(
+            &root.path,
+            &relative_path,
+            &content_hash,
+            size_bytes,
+        ))
     })
     .await
     .map_err(|error| error.to_string())?
@@ -889,8 +937,8 @@ pub fn acknowledge_sync_change(id: String, state: State<'_, SyncState>) -> Resul
 #[cfg(test)]
 mod tests {
     use super::{
-        build_local_file_index, load_recent_changes, validate_relative_path, SyncChange, SyncRoot,
-        MAX_PENDING_CHANGES,
+        build_local_file_index, load_recent_changes, sync_file_matches, validate_relative_path,
+        SyncChange, SyncRoot, MAX_PENDING_CHANGES,
     };
     use std::{fs, path::PathBuf};
     use uuid::Uuid;
@@ -940,6 +988,26 @@ mod tests {
         )));
 
         assert_eq!(index.len(), 1);
+        fs::remove_dir_all(&root).expect("test root cleans up");
+    }
+
+    #[test]
+    fn local_sync_copy_verification_checks_path_size_and_checksum() {
+        let root = std::env::temp_dir().join(format!("cloudfusion-verify-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("test root creates");
+        fs::write(root.join("copy.txt"), b"abc").expect("test file writes");
+        let root_path = root.to_string_lossy().into_owned();
+        let checksum = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+        assert!(sync_file_matches(&root_path, "copy.txt", checksum, 3));
+        assert!(!sync_file_matches(&root_path, "copy.txt", checksum, 4));
+        assert!(!sync_file_matches(
+            &root_path,
+            "../outside.txt",
+            checksum,
+            3
+        ));
+
         fs::remove_dir_all(&root).expect("test root cleans up");
     }
 
