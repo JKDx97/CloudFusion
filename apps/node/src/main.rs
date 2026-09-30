@@ -11,12 +11,13 @@ use std::{
 };
 use uuid::Uuid;
 
+mod mesh;
 mod sync;
 
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const MAX_CONFIG_BYTES: u64 = 128 * 1024;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct NodeConfig {
     pub(crate) api_url: String,
@@ -132,7 +133,7 @@ async fn run() -> Result<(), String> {
 }
 
 fn usage() -> String {
-    "Usage:\n  cloudfusion-node login --api <https://cloudfusion.example/api>\n  cloudfusion-node status\n  cloudfusion-node sync add --path <local-folder> --remote-node-id <folder-uuid>\n  cloudfusion-node sync list\n  cloudfusion-node sync remove --root-id <root-uuid>\n  cloudfusion-node start\n  cloudfusion-node logout\n\nPair the node with a short-lived code created from CloudFusion > Dispositivos.\n`start` runs background CloudFusion Drive synchronization until interrupted; P2P serving is a separate opt-in and follow-up milestone.".to_owned()
+    "Usage:\n  cloudfusion-node login --api <https://cloudfusion.example/api>\n  cloudfusion-node status\n  cloudfusion-node sync add --path <local-folder> --remote-node-id <folder-uuid>\n  cloudfusion-node sync list\n  cloudfusion-node sync remove --root-id <root-uuid>\n  cloudfusion-node start\n  cloudfusion-node logout\n\nPair the node with a short-lived code created from CloudFusion > Dispositivos.\n`start` runs background synchronization; P2P file serving is opt-in in Dispositivos and requires an active local sync copy.".to_owned()
 }
 
 fn parse_api_argument(mut args: impl Iterator<Item = String>) -> Result<String, String> {

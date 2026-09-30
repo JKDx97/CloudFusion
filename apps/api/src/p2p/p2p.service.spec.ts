@@ -125,6 +125,31 @@ describe('P2pService transfer coordination', () => {
     expect(result.expiresAt.getTime()).toBeGreaterThan(Date.now());
   });
 
+  it('advertises a bounded batch while validating each file against its exact readable version', async () => {
+    const ctx = makeService();
+    const item = { nodeId: 'node-id', versionId: 'version-id', contentHash: checksum, sizeBytes: '17' };
+
+    const result = await ctx.service.advertiseAvailabilityBatch('source-user', 'source-device', [item, item]);
+
+    expect(result.results).toEqual([
+      { nodeId: 'node-id', versionId: 'version-id', advertised: true },
+      { nodeId: 'node-id', versionId: 'version-id', advertised: true },
+    ]);
+    expect(ctx.deviceSessions.getActive).toHaveBeenCalledTimes(1);
+    expect(ctx.availability.save).toHaveBeenCalledTimes(2);
+  });
+
+  it('rejects an empty or oversized availability batch before any database work', async () => {
+    const ctx = makeService();
+    const item = { nodeId: 'node-id', versionId: 'version-id', contentHash: checksum, sizeBytes: '17' };
+
+    await expect(ctx.service.advertiseAvailabilityBatch('source-user', 'source-device', []))
+      .rejects.toThrow('between 1 and 500');
+    await expect(ctx.service.advertiseAvailabilityBatch('source-user', 'source-device', Array(501).fill(item)))
+      .rejects.toThrow('between 1 and 500');
+    expect(ctx.deviceSessions.getActive).not.toHaveBeenCalled();
+  });
+
   it('does not publish availability when the device has not allowed serving local files', async () => {
     const ctx = makeService();
     ctx.deviceSessions.getActive.mockResolvedValue({ ...sourceDevice, serveLocalFiles: false } as never);

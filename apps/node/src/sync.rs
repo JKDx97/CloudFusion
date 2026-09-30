@@ -12,6 +12,7 @@ use std::{
     time::Duration,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::watch;
 use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 
@@ -23,9 +24,18 @@ const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct NodeSyncRoot {
-    id: String,
-    path: String,
-    remote_node_id: String,
+    pub(crate) id: String,
+    pub(crate) path: String,
+    pub(crate) remote_node_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct P2pLocalFile {
+    pub(crate) node_id: String,
+    pub(crate) version_id: String,
+    pub(crate) checksum: String,
+    pub(crate) size: u64,
+    pub(crate) path: PathBuf,
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
@@ -259,23 +269,50 @@ pub(crate) async fn run_daemon() -> Result<(), String> {
         config.sync_roots.len()
     );
     let client = build_client()?;
+    let session = refresh_session(&client, &mut config).await?;
+    let initial_expiry = token_expiration(&session.access_token)
+        .unwrap_or_else(unix_time_seconds)
+        .max(unix_time_seconds());
+    let mut access_token = Some((session.access_token.clone(), initial_expiry));
+    let (credentials_tx, credentials_rx) = watch::channel(crate::mesh::MeshCredentials {
+        api_url: config.api_url.clone(),
+        access_token: session.access_token,
+    });
+    let (mesh_stop_tx, mesh_stop_rx) = watch::channel(false);
+    let mut mesh_task = tokio::spawn(crate::mesh::run_mesh(
+        config.clone(),
+        credentials_rx,
+        mesh_stop_rx,
+    ));
     let mut ticker = tokio::time::interval(Duration::from_secs(30));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    let mut access_token: Option<(String, u64)> = None;
     let shutdown = tokio::signal::ctrl_c();
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
             _ = &mut shutdown => {
+                let _ = mesh_stop_tx.send(true);
+                let _ = (&mut mesh_task).await;
                 println!("CloudFusion NAS sync stopped.");
                 return Ok(());
+            }
+            result = &mut mesh_task => {
+                return match result {
+                    Ok(Ok(())) => Ok(()),
+                    Ok(Err(error)) => Err(format!("P2P device service stopped: {error}")),
+                    Err(_) => Err("P2P device service failed unexpectedly".to_owned()),
+                };
             }
             _ = ticker.tick() => {
                 let now = unix_time_seconds();
                 if access_token.as_ref().is_none_or(|(_, exp)| *exp <= now.saturating_add(60)) {
                     let session = refresh_session(&client, &mut config).await?;
                     let expires = token_expiration(&session.access_token).unwrap_or(now);
-                    access_token = Some((session.access_token, expires));
+                    access_token = Some((session.access_token.clone(), expires));
+                    credentials_tx.send_replace(crate::mesh::MeshCredentials {
+                        api_url: config.api_url.clone(),
+                        access_token: session.access_token,
+                    });
                 }
                 let token = access_token.as_ref().map(|(value, _)| value.as_str()).unwrap_or_default();
                 sync_cycle(&client, &config.api_url, token, &config.sync_roots).await;
@@ -1231,6 +1268,10 @@ fn manifest_path() -> Result<PathBuf, String> {
 
 fn load_manifest() -> Result<SyncManifest, String> {
     let path = manifest_path()?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Could not resolve node configuration directory".to_owned())?;
+    validate_manifest_parent(parent)?;
     let metadata = match fs::symlink_metadata(&path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(SyncManifest::default()),
@@ -1255,6 +1296,56 @@ fn load_manifest() -> Result<SyncManifest, String> {
     .map_err(|_| "Node sync manifest is invalid".to_owned())
 }
 
+pub(crate) async fn verified_local_files(
+    roots: &[NodeSyncRoot],
+) -> Result<Vec<P2pLocalFile>, String> {
+    let manifest = load_manifest()?;
+    let mut files = Vec::new();
+    for root in roots {
+        validate_root(root)?;
+        let Some(entries) = manifest.roots.get(&root.id) else {
+            continue;
+        };
+        for (relative, entry) in entries {
+            let path = match safe_target(&root.path, relative, false) {
+                Ok(path) => path,
+                Err(_) => continue,
+            };
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => {
+                    metadata
+                }
+                _ => continue,
+            };
+            if metadata.len() != entry.size {
+                continue;
+            }
+            let modified_ns = match local_modified_ns_from_path(&path) {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            let (size, checksum) = if entry.local_modified_ns == Some(modified_ns) {
+                (entry.size, entry.checksum.clone())
+            } else {
+                match hash_file(&path).await {
+                    Ok(value) => value,
+                    Err(_) => continue,
+                }
+            };
+            if size == entry.size && checksum.eq_ignore_ascii_case(&entry.checksum) {
+                files.push(P2pLocalFile {
+                    node_id: entry.node_id.clone(),
+                    version_id: entry.version_id.clone(),
+                    checksum,
+                    size,
+                    path,
+                });
+            }
+        }
+    }
+    Ok(files)
+}
+
 fn save_manifest(manifest: &SyncManifest) -> Result<(), String> {
     let path = manifest_path()?;
     let parent = path
@@ -1262,6 +1353,7 @@ fn save_manifest(manifest: &SyncManifest) -> Result<(), String> {
         .ok_or_else(|| "Could not resolve node configuration directory".to_owned())?;
     fs::create_dir_all(parent)
         .map_err(|_| "Could not create node configuration directory".to_owned())?;
+    validate_manifest_parent(parent)?;
     if let Ok(metadata) = fs::symlink_metadata(&path) {
         if metadata.file_type().is_symlink() || !metadata.is_file() {
             return Err("Node sync manifest is not a safe file".to_owned());
@@ -1291,6 +1383,22 @@ fn save_manifest(manifest: &SyncManifest) -> Result<(), String> {
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
         return Err("Could not securely save node sync manifest".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_manifest_parent(parent: &Path) -> Result<(), String> {
+    let metadata = fs::symlink_metadata(parent)
+        .map_err(|_| "Could not inspect node configuration directory".to_owned())?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("Node configuration directory is not a safe directory".to_owned());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err("Node sync metadata directory must be owner-only (0700)".to_owned());
+        }
     }
     Ok(())
 }

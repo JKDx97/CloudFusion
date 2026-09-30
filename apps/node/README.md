@@ -27,7 +27,9 @@ cloudfusion-node start
 
 `start` runs an initial sync, then checks for changes about every 30 seconds until Ctrl+C. Local additions and edits are uploaded; remote versions are downloaded after their size and SHA-256 are verified. Concurrent edits are preserved as conflict copies. Symbolic links and unsafe paths are skipped or rejected. File deletions are deliberately not propagated yet, so removing a configured root does not delete its local contents or cloud files. Run `cloudfusion-node sync remove --root-id <root-uuid>` to unlink a local root.
 
-The initial service uses the authenticated CloudFusion API and existing cloud replication queue; it does not yet transfer file data directly between peers. LAN/Internet P2P serving, relay transport, and Linux/NAS release packaging remain follow-up work. Device P2P settings default to disabled and must remain opt-in.
+The node can also serve verified local versions to other registered CloudFusion devices over the existing `/cloudfusion/file-chunk/1` protocol. In **Dispositivos**, enable **P2P**, **Compartir archivos locales**, and either **Descubrimiento LAN** or **P2P por Internet**. The node checks its device settings itself, trusts only active P2P-enabled devices on the account, claims a one-use API ticket before sending, verifies the local SHA-256, and checks the transfer state while serving. Availability leases are renewed in bounded batches every five minutes; stopped nodes become unavailable when their leases expire. LAN discovery uses mDNS/QUIC. Internet relay participation requires `CLOUDFUSION_RELAY_MULTIADDR` to contain the configured relay multiaddress ending in `/p2p/<relay-peer-id>` and the device's relay option to be enabled.
+
+The node currently serves P2P reads; its own sync downloads still use the authenticated API rather than requesting data from peers. A P2P requester in the headless CLI and a packaged Linux/NAS release remain follow-up work. P2P remains opt-in and disabled by default.
 
 Use `http://localhost:3000` only for a local development API. Remote API addresses must use HTTPS. Do not expose the API pairing code to anyone else.
 

@@ -11,9 +11,11 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { AccessTokenGuard } from '../auth/guards/access-token.guard';
 import type { AuthenticatedRequest } from '../auth/types/authenticated-request';
 import { AdvertiseAvailabilityDto } from './dto/advertise-availability.dto';
+import { AdvertiseAvailabilityBatchDto } from './dto/advertise-availability-batch.dto';
 import { AuthorizePeerTransferDto } from './dto/authorize-peer-transfer.dto';
 import { ClaimPeerTransferDto } from './dto/claim-peer-transfer.dto';
 import { ListAvailabilityDto } from './dto/list-availability.dto';
@@ -31,6 +33,16 @@ export class P2pController {
   @ApiOperation({ summary: 'Advertise a locally cached, authorized CloudFusion file version' })
   advertiseAvailability(@Req() request: AuthenticatedRequest, @Body() dto: AdvertiseAvailabilityDto) {
     return this.p2p.advertiseAvailability(request.user.sub, request.user.deviceId, dto);
+  }
+
+  @Post('availability/batch')
+  @Throttle({ default: { limit: 15, ttl: 60_000 } })
+  @ApiOperation({ summary: 'Advertise up to 500 verified local file versions in one bounded request' })
+  advertiseAvailabilityBatch(
+    @Req() request: AuthenticatedRequest,
+    @Body() dto: AdvertiseAvailabilityBatchDto,
+  ) {
+    return this.p2p.advertiseAvailabilityBatch(request.user.sub, request.user.deviceId, dto.items);
   }
 
   @Delete('availability/:nodeId/:versionId')

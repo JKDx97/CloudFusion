@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   HttpException,
@@ -70,6 +71,42 @@ export class P2pService {
   async advertiseAvailability(userId: string, deviceId: string | undefined, dto: AdvertiseAvailabilityDto) {
     const device = await this.requireCurrentDevice(userId, deviceId);
     this.requireServingDevice(device);
+    return this.advertiseForDevice(userId, device, dto, true);
+  }
+
+  async advertiseAvailabilityBatch(userId: string, deviceId: string | undefined, items: AdvertiseAvailabilityDto[]) {
+    if (!Array.isArray(items) || items.length < 1 || items.length > 500) {
+      throw new BadRequestException('A P2P availability batch must contain between 1 and 500 items');
+    }
+    const device = await this.requireCurrentDevice(userId, deviceId);
+    this.requireServingDevice(device);
+    const results: Array<{ nodeId: string; versionId: string; advertised: boolean }> = [];
+    for (let offset = 0; offset < items.length; offset += 10) {
+      const chunk = items.slice(offset, offset + 10);
+      const outcomes = await Promise.all(chunk.map(async (item) => {
+        try {
+          await this.advertiseForDevice(userId, device, item, false);
+          return { nodeId: item.nodeId, versionId: item.versionId, advertised: true };
+        } catch {
+          return { nodeId: item.nodeId, versionId: item.versionId, advertised: false };
+        }
+      }));
+      results.push(...outcomes);
+    }
+    const accepted = results.filter((result) => result.advertised).length;
+    await this.audit.record(userId, 'P2P_FILE_AVAILABILITY_BATCH_ADVERTISED', 'UserDevice', device.id, {
+      accepted,
+      rejected: results.length - accepted,
+    });
+    return { results };
+  }
+
+  private async advertiseForDevice(
+    userId: string,
+    device: UserDevice,
+    dto: AdvertiseAvailabilityDto,
+    recordAudit: boolean,
+  ) {
     const { node, version } = await this.requireReadableVersion(userId, dto.nodeId, dto.versionId);
     if (dto.contentHash.toLowerCase() !== version.checksum.toLowerCase() || BigInt(dto.sizeBytes) !== BigInt(version.size)) {
       throw new ConflictException('The local file does not match the authorized CloudFusion version');
@@ -97,10 +134,12 @@ export class P2pService {
     value.lastVerifiedAt = now;
     value.expiresAt = this.addSeconds(now, this.availabilityTtlSeconds());
     await this.availability.save(value);
-    await this.audit.record(userId, 'P2P_FILE_AVAILABILITY_ADVERTISED', 'VirtualNode', node.id, {
-      deviceId: device.id,
-      versionId: version.id,
-    });
+    if (recordAudit) {
+      await this.audit.record(userId, 'P2P_FILE_AVAILABILITY_ADVERTISED', 'VirtualNode', node.id, {
+        deviceId: device.id,
+        versionId: version.id,
+      });
+    }
     return {
       nodeId: node.id,
       versionId: version.id,
