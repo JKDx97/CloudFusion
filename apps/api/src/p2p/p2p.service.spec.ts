@@ -202,6 +202,24 @@ describe('P2pService transfer coordination', () => {
     expect(result.contentHash).toBe(checksum);
   });
 
+  it('stops serving an active transfer when either device disables its P2P permission', async () => {
+    const sourceCtx = makeService();
+    sourceCtx.deviceSessions.getActive
+      .mockResolvedValueOnce(sourceDevice as never)
+      .mockResolvedValueOnce({ ...sourceDevice, serveLocalFiles: false } as never)
+      .mockResolvedValueOnce(destinationDevice as never);
+    await expect(sourceCtx.service.getTransfer('source-user', 'source-device', 'transfer-id'))
+      .rejects.toBeInstanceOf(ForbiddenException);
+
+    const destinationCtx = makeService();
+    destinationCtx.deviceSessions.getActive
+      .mockResolvedValueOnce(destinationDevice as never)
+      .mockResolvedValueOnce(sourceDevice as never)
+      .mockResolvedValueOnce({ ...destinationDevice, p2pEnabled: false } as never);
+    await expect(destinationCtx.service.getTransfer('destination-user', 'destination-device', 'transfer-id'))
+      .rejects.toBeInstanceOf(ForbiddenException);
+  });
+
   it('rejects a ticket presented by a device other than its named source', async () => {
     const ctx = makeService();
 

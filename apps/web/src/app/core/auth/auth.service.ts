@@ -147,6 +147,7 @@ export class AuthService {
     if (this.isDesktop()) {
       sessionStorage.removeItem(this.accessTokenKey);
       localStorage.removeItem(this.desktopRefreshTokenMarker);
+      void this.nativeInvoke<void>('stop_lan_mesh').catch(() => undefined);
       void this.nativeInvoke<void>('delete_refresh_token').catch(() => undefined);
     } else {
       localStorage.removeItem(this.accessTokenKey);
@@ -174,6 +175,10 @@ export class AuthService {
         localStorage.setItem(this.desktopRefreshTokenMarker, '1');
         this.saveDeviceId(session.deviceId);
         this.saveUser(session.user);
+        return this.nativeInvoke<void>('configure_mesh_api', {
+          apiUrl: this.apiUrl,
+          accessToken: session.accessToken,
+        }).catch(() => undefined);
       });
     }
 

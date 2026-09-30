@@ -166,6 +166,36 @@ pub async fn index_sync_files(state: State<'_, SyncState>) -> Result<usize, Stri
     .map_err(|error| error.to_string())?
 }
 
+#[tauri::command]
+pub async fn has_indexed_file_version(
+    content_hash: String,
+    size_bytes: String,
+    state: State<'_, SyncState>,
+) -> Result<bool, String> {
+    if content_hash.len() != 64 || !content_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("File checksum is invalid".to_owned());
+    }
+    let size_bytes = size_bytes
+        .parse::<u64>()
+        .map_err(|_| "File size is invalid".to_owned())?;
+    let index = state.shared_local_file_index();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Ok(path) = resolve_indexed_file(&index, &content_hash, size_bytes) else {
+            return Ok(false);
+        };
+        let actual_size = fs::metadata(&path)
+            .map_err(|error| error.to_string())?
+            .len();
+        if actual_size != size_bytes {
+            return Ok(false);
+        }
+        let actual_hash = hash_file(&path)?;
+        Ok(actual_hash.eq_ignore_ascii_case(&content_hash))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 fn build_local_file_index(roots: &[SyncRoot]) -> Result<LocalFileIndex, String> {
     let mut index = HashMap::new();
     let mut visited = 0usize;
@@ -218,7 +248,7 @@ fn index_directory(
     Ok(())
 }
 
-fn hash_file(path: &Path) -> Result<String, String> {
+pub(crate) fn hash_file(path: &Path) -> Result<String, String> {
     let file = File::open(path).map_err(|error| error.to_string())?;
     let mut reader = BufReader::with_capacity(HASH_BUFFER_BYTES, file);
     let mut hasher = Sha256::new();

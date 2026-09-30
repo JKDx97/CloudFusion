@@ -368,6 +368,14 @@ export class P2pService {
 
   async getTransfer(userId: string, deviceId: string | undefined, transferId: string) {
     const transfer = await this.requireParticipant(userId, deviceId, transferId);
+    if (ACTIVE_TRANSFER_STATUSES.includes(transfer.status)) {
+      const [source, destination] = await Promise.all([
+        this.deviceSessions.getActive(transfer.sourceUserId, transfer.sourceDeviceId),
+        this.deviceSessions.getActive(transfer.destinationUserId, transfer.destinationDeviceId),
+      ]);
+      this.requireServingDevice(source);
+      this.requirePeerEnabled(destination);
+    }
     if (transfer.status === PeerTransferStatus.AUTHORIZED && transfer.ticketExpiresAt <= new Date()) {
       transfer.status = PeerTransferStatus.EXPIRED;
       await this.transfers.save(transfer);

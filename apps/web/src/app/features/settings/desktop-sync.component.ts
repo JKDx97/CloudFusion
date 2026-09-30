@@ -30,6 +30,7 @@ interface RegisteredDevice {
   id: string;
   p2pEnabled: boolean;
   lanDiscoveryEnabled: boolean;
+  serveLocalFiles: boolean;
 }
 
 interface MeshPeer {
@@ -78,6 +79,7 @@ export class DesktopSyncComponent implements OnInit, OnDestroy {
   readonly busy = signal(false);
   readonly error = signal<string | null>(null);
   readonly meshEnabled = signal(false);
+  readonly serveLocalFiles = signal(false);
   readonly meshBusy = signal(false);
   readonly meshPeers = signal<MeshPeer[]>([]);
   readonly meshPeerStatuses = signal<Record<string, string>>({});
@@ -188,6 +190,7 @@ export class DesktopSyncComponent implements OnInit, OnDestroy {
         { p2pEnabled: true, lanDiscoveryEnabled: true, internetP2pEnabled: false },
       ));
       await this.loadMeshConfiguration(false);
+      await this.configureMeshApi();
       await this.invoke<void>('start_lan_mesh');
       this.meshEnabled.set(true);
       this.meshStatus.set('Buscando dispositivos autorizados en la red local…');
@@ -231,9 +234,37 @@ export class DesktopSyncComponent implements OnInit, OnDestroy {
     const current = devices.data.find((item) => item.id === deviceId);
     const enabled = !!current?.p2pEnabled && !!current.lanDiscoveryEnabled;
     this.meshEnabled.set(enabled);
+      this.serveLocalFiles.set(!!current?.serveLocalFiles);
     this.meshPeers.set(peers.data);
     await this.invoke<void>('set_trusted_mesh_peers', { peerIds: peers.data.map((peer) => peer.peerId) });
-    if (enabled && startIfEnabled) await this.invoke<void>('start_lan_mesh');
+    if (enabled && startIfEnabled) {
+      await this.configureMeshApi();
+      await this.invoke<void>('start_lan_mesh');
+    }
+  }
+
+  private async configureMeshApi(): Promise<void> {
+    const accessToken = this.authService.accessToken;
+    if (!accessToken) throw new Error('No active CloudFusion session');
+    await this.invoke<void>('configure_mesh_api', { apiUrl: this.apiUrl, accessToken });
+  }
+
+  async updateLocalFileServing(event: Event): Promise<void> {
+    const enabled = (event.target as HTMLInputElement).checked;
+    const deviceId = this.authService.deviceId;
+    if (!deviceId) return;
+    try {
+      await firstValueFrom(this.http.patch<ApiResponse<RegisteredDevice>>(
+        `${this.apiUrl}/devices/${deviceId}/settings`,
+        { serveLocalFiles: enabled },
+      ));
+      this.serveLocalFiles.set(enabled);
+      this.meshStatus.set(enabled
+        ? 'Este dispositivo puede ofrecer copias verificadas a tus otros equipos.'
+        : 'Este dispositivo ya no ofrece archivos a otros equipos.');
+    } catch {
+      this.error.set('No se pudo actualizar el permiso de compartir archivos locales.');
+    }
   }
 
   private bridgeAvailable(): boolean {
