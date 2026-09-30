@@ -3,6 +3,10 @@ export interface TransferSourceCandidate {
   lastVerifiedAt: string;
 }
 
+export type TransferFallbackResult<TSource, TPeerResult, TCloudResult> =
+  | { route: 'peer'; source: TSource; result: TPeerResult }
+  | { route: 'cloud'; result: TCloudResult };
+
 /** Orders already-authorized peer copies by the best currently observed route. */
 export class TransferPathSelector {
   orderSources<T extends TransferSourceCandidate>(
@@ -14,6 +18,22 @@ export class TransferPathSelector {
       if (routeDifference !== 0) return routeDifference;
       return this.verifiedAt(right.lastVerifiedAt) - this.verifiedAt(left.lastVerifiedAt);
     });
+  }
+
+  async attemptPeersThenFallback<T extends TransferSourceCandidate, TPeerResult, TCloudResult>(
+    sources: readonly T[],
+    peerStatuses: Readonly<Record<string, string>>,
+    attempt: (source: T) => Promise<TPeerResult>,
+    cloudFallback: () => Promise<TCloudResult>,
+  ): Promise<TransferFallbackResult<T, TPeerResult, TCloudResult>> {
+    for (const source of this.orderSources(sources, peerStatuses)) {
+      try {
+        return { route: 'peer', source, result: await attempt(source) };
+      } catch {
+        // A failed peer is expected to fall through to the next authorized source.
+      }
+    }
+    return { route: 'cloud', result: await cloudFallback() };
   }
 
   private routePriority(peerId: string, peerStatuses: Readonly<Record<string, string>>): number {

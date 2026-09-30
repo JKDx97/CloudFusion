@@ -185,47 +185,54 @@ export class DriveComponent implements OnInit {
       }
       this.p2pSources.update((current) => ({ ...current, [version.id]: sources }));
 
-      const orderedSources = this.transferPathSelector.orderSources(sources, this.meshPeerStatuses());
-      if (orderedSources.length) {
-        const destinationPath = await this.invokeDesktop<string | null>('choose_p2p_destination', {
+      let destinationPath: string | null = null;
+      if (sources.length) {
+        destinationPath = await this.invokeDesktop<string | null>('choose_p2p_destination', {
           fileName: `${target.name}.v${version.versionNumber}`,
         });
         if (!destinationPath) return;
-        for (const source of orderedSources) {
-          try {
-            await this.tryP2pDownload(version, target.id, source, destinationPath, destinationDeviceId, accessToken);
-            this.announce(`Versión verificada recibida por ${this.peerRouteLabel(source.peerId)} y guardada en ${destinationPath}.`);
-            return;
-          } catch {
-            // Try the next authorized local copy before using the cloud replica.
-          }
-        }
       }
 
-      const progressId = `cloud-${version.id}-${Date.now()}`;
-      this.p2pProgress.set({
-        transferId: progressId,
-        bytesTransferred: '0',
-        totalBytes: String(version.size),
-        status: 'CLOUD_FALLBACK',
-        transport: 'CLOUD_FALLBACK',
-      });
-      try {
-        const blob = await firstValueFrom(this.cloud.downloadFileVersion(target.id, version.id));
-        this.saveDownload(blob, `${target.name}.v${version.versionNumber}`);
-        this.p2pProgress.update((progress) => ({
-          transferId: progress?.transferId ?? progressId,
-          bytesTransferred: String(version.size),
-          totalBytes: String(version.size),
-          status: 'CLOUD_FALLBACK_COMPLETED',
-          transport: 'CLOUD_FALLBACK',
-        }));
-        this.announce(orderedSources.length
-          ? 'Las rutas entre dispositivos no estuvieron disponibles; CloudFusion descargó la versión autorizada desde la nube.'
-          : 'Ningún dispositivo anunció una copia local; CloudFusion descargó la versión autorizada desde la nube.');
-      } catch {
-        this.p2pProgress.update((progress) => progress ? { ...progress, status: 'CLOUD_FALLBACK_FAILED' } : null);
-        this.fail('No se pudo recibir el archivo desde los dispositivos ni recuperar su réplica cloud.');
+      const outcome = await this.transferPathSelector.attemptPeersThenFallback(
+        sources,
+        this.meshPeerStatuses(),
+        async (source) => {
+          if (!destinationPath) throw new Error('No P2P destination was selected');
+          await this.tryP2pDownload(version, target.id, source, destinationPath, destinationDeviceId, accessToken);
+          return destinationPath;
+        },
+        async () => {
+          const progressId = `cloud-${version.id}-${Date.now()}`;
+          this.p2pProgress.set({
+            transferId: progressId,
+            bytesTransferred: '0',
+            totalBytes: String(version.size),
+            status: 'CLOUD_FALLBACK',
+            transport: 'CLOUD_FALLBACK',
+          });
+          try {
+            const blob = await firstValueFrom(this.cloud.downloadFileVersion(target.id, version.id));
+            this.saveDownload(blob, `${target.name}.v${version.versionNumber}`);
+            this.p2pProgress.update((progress) => ({
+              transferId: progress?.transferId ?? progressId,
+              bytesTransferred: String(version.size),
+              totalBytes: String(version.size),
+              status: 'CLOUD_FALLBACK_COMPLETED',
+              transport: 'CLOUD_FALLBACK',
+            }));
+            this.announce(sources.length
+              ? 'Las rutas entre dispositivos no estuvieron disponibles; CloudFusion descargó la versión autorizada desde la nube.'
+              : 'Ningún dispositivo anunció una copia local; CloudFusion descargó la versión autorizada desde la nube.');
+            return true;
+          } catch {
+            this.p2pProgress.update((progress) => progress ? { ...progress, status: 'CLOUD_FALLBACK_FAILED' } : null);
+            this.fail('No se pudo recibir el archivo desde los dispositivos ni recuperar su réplica cloud.');
+            return false;
+          }
+        },
+      );
+      if (outcome.route === 'peer') {
+        this.announce(`Versión verificada recibida por ${this.peerRouteLabel(outcome.source.peerId)} y guardada en ${outcome.result}.`);
       }
     } catch {
       this.fail('No se pudo iniciar la descarga. Comprueba CloudFusion Desktop y vuelve a intentarlo.');
