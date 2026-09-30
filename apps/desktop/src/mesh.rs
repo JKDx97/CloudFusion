@@ -18,12 +18,12 @@ use std::{
     str::FromStr,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex, RwLock,
+        Arc, Mutex, RwLock, Weak,
     },
     time::{Duration, Instant},
 };
 use tauri::{AppHandle, Emitter, State};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch, Mutex as AsyncMutex, OwnedMutexGuard};
 
 const TRANSFER_PROTOCOL: &str = "/cloudfusion/file-chunk/1";
 pub(crate) const MAX_CHUNK_BYTES: u32 = 256 * 1024;
@@ -85,7 +85,6 @@ struct SourceTransfer {
     content_hash: String,
     total_bytes: u64,
     bytes_served: u64,
-    completed: bool,
     last_activity: Instant,
     last_api_check: Instant,
     modified_at: Option<std::time::SystemTime>,
@@ -149,6 +148,7 @@ pub struct MeshManager {
     api_credentials: Arc<RwLock<Option<MeshApiCredentials>>>,
     command_sender: Arc<Mutex<Option<mpsc::Sender<MeshCommand>>>>,
     peer_transfer_paths: Arc<RwLock<HashMap<String, String>>>,
+    partial_download_locks: Mutex<HashMap<String, Weak<AsyncMutex<()>>>>,
 }
 
 impl MeshManager {
@@ -161,7 +161,30 @@ impl MeshManager {
             api_credentials: Arc::new(RwLock::new(None)),
             command_sender: Arc::new(Mutex::new(None)),
             peer_transfer_paths: Arc::new(RwLock::new(HashMap::new())),
+            partial_download_locks: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub(crate) async fn lock_partial_download(
+        &self,
+        key: String,
+    ) -> Result<OwnedMutexGuard<()>, String> {
+        let lock = {
+            let mut locks = self
+                .partial_download_locks
+                .lock()
+                .map_err(|_| "The P2P partial-download lock is unavailable".to_owned())?;
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            match locks.get(&key).and_then(Weak::upgrade) {
+                Some(lock) => lock,
+                None => {
+                    let lock = Arc::new(AsyncMutex::new(()));
+                    locks.insert(key, Arc::downgrade(&lock));
+                    lock
+                }
+            }
+        };
+        Ok(lock.lock_owned().await)
     }
 
     pub(crate) async fn request_chunk(
@@ -698,8 +721,8 @@ async fn serve_chunk_request(
     transfers.retain(|_, transfer| transfer.last_activity.elapsed() < SOURCE_SESSION_TTL);
 
     if !transfers.contains_key(&request.transfer_id) {
-        if request.offset != 0 {
-            return fail("A P2P transfer must start at byte zero");
+        if request.offset > request.total_bytes {
+            return fail("P2P resume offset exceeds the authorized file size");
         }
         if transfers.len() >= MAX_SOURCE_TRANSFERS {
             return fail("This device has reached its active P2P transfer limit");
@@ -767,8 +790,7 @@ async fn serve_chunk_request(
                 file_path,
                 content_hash: request.content_hash.to_ascii_lowercase(),
                 total_bytes: request.total_bytes,
-                bytes_served: 0,
-                completed: false,
+                bytes_served: request.offset,
                 last_activity: Instant::now(),
                 last_api_check: Instant::now(),
                 modified_at,
@@ -782,9 +804,7 @@ async fn serve_chunk_request(
     if transfer.peer_id != peer_id
         || transfer.content_hash != request.content_hash.to_ascii_lowercase()
         || transfer.total_bytes != request.total_bytes
-        || request.offset > transfer.total_bytes
-        || request.offset != transfer.bytes_served
-        || transfer.completed
+        || !valid_resume_offset(request.offset, transfer.bytes_served, transfer.total_bytes)
     {
         return fail("P2P request does not match its authorized transfer");
     }
@@ -826,8 +846,7 @@ async fn serve_chunk_request(
     if bytes.is_empty() && request.total_bytes != 0 && next_offset < request.total_bytes {
         return fail("The local file ended before its authorized size");
     }
-    transfer.bytes_served = next_offset;
-    transfer.completed = next_offset == transfer.total_bytes;
+    transfer.bytes_served = transfer.bytes_served.max(next_offset);
     ChunkResponse {
         transfer_id: request.transfer_id,
         content_hash: transfer.content_hash.clone(),
@@ -849,6 +868,10 @@ fn read_chunk(path: &std::path::Path, offset: u64, length: usize) -> Result<Vec<
     Ok(bytes)
 }
 
+fn valid_resume_offset(offset: u64, bytes_served: u64, total_bytes: u64) -> bool {
+    offset <= bytes_served && offset <= total_bytes
+}
+
 fn is_trusted(trusted_peer_ids: &RwLock<HashSet<String>>, peer_id: &PeerId) -> bool {
     trusted_peer_ids
         .read()
@@ -858,7 +881,10 @@ fn is_trusted(trusted_peer_ids: &RwLock<HashSet<String>>, peer_id: &PeerId) -> b
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_relay_address, relay_peer_address, relay_peer_id, transfer_path_priority};
+    use super::{
+        parse_relay_address, relay_peer_address, relay_peer_id, transfer_path_priority,
+        valid_resume_offset,
+    };
     use libp2p::{multiaddr::Protocol, Multiaddr, PeerId};
     use std::str::FromStr;
 
@@ -890,5 +916,14 @@ mod tests {
     fn preferred_transfer_path_prioritizes_local_direct_then_internet_direct_then_relay() {
         assert!(transfer_path_priority("LAN_DIRECT") < transfer_path_priority("P2P_DIRECT"));
         assert!(transfer_path_priority("P2P_DIRECT") < transfer_path_priority("P2P_RELAY"));
+    }
+
+    #[test]
+    fn resumed_peer_requests_allow_replays_but_not_unserved_gaps() {
+        assert!(valid_resume_offset(780, 780, 1000));
+        assert!(valid_resume_offset(700, 780, 1000));
+        assert!(valid_resume_offset(1000, 1000, 1000));
+        assert!(!valid_resume_offset(781, 780, 1000));
+        assert!(!valid_resume_offset(1001, 1000, 1000));
     }
 }

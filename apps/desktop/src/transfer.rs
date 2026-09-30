@@ -3,11 +3,12 @@ use libp2p::PeerId;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use std::{
+    io::SeekFrom,
     path::{Path, PathBuf},
     str::FromStr,
 };
 use tauri::{AppHandle, Emitter, State};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use uuid::Uuid;
 
 #[tauri::command]
@@ -108,27 +109,23 @@ pub async fn download_p2p_file(
         let _ = cancel_transfer(&credentials, &transfer_id).await;
         return Err(error);
     }
-    let partial = match temporary_path(&target, &transfer_id) {
+    let partial = match temporary_path(&target, &content_hash) {
         Ok(path) => path,
         Err(error) => {
             let _ = cancel_transfer(&credentials, &transfer_id).await;
             return Err(error);
         }
     };
-    let output = tokio::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&partial)
+    let _partial_lock = match manager
+        .lock_partial_download(partial.to_string_lossy().into_owned())
         .await
-        .map_err(|_| "Could not create a temporary file beside the destination".to_owned());
-    let output = match output {
-        Ok(output) => output,
+    {
+        Ok(lock) => lock,
         Err(error) => {
             let _ = cancel_transfer(&credentials, &transfer_id).await;
             return Err(error);
         }
     };
-    drop(output);
 
     let result = receive_and_finalize(
         &app,
@@ -145,7 +142,6 @@ pub async fn download_p2p_file(
     .await;
 
     if result.is_err() {
-        let _ = tokio::fs::remove_file(&partial).await;
         let transport = manager.transfer_path_for_peer(&source_peer_id);
         if update_transfer_state(&credentials, &transfer_id, "FAILED", None, &transport)
             .await
@@ -170,15 +166,22 @@ async fn receive_and_finalize(
     target: &Path,
 ) -> Result<(), String> {
     let transport = manager.transfer_path_for_peer(source_peer_id);
-    let mut output = tokio::fs::OpenOptions::new()
-        .write(true)
-        .open(partial)
-        .await
-        .map_err(|_| "Could not open the temporary download file".to_owned())?;
-    let mut hasher = Sha256::new();
-    let mut offset = 0u64;
+    let (mut output, mut offset, mut hasher) = open_or_resume_partial(partial, total_bytes).await?;
     let mut first_request = true;
-    let mut last_reported = 0u64;
+    let resume_offset = offset;
+    let mut last_reported = offset;
+    if offset > 0 {
+        let _ = app.emit(
+            "p2p-transfer-progress",
+            serde_json::json!({
+                "transferId": transfer_id,
+                "bytesTransferred": offset.to_string(),
+                "totalBytes": total_bytes.to_string(),
+                "status": "RESUMING",
+                "transport": transport,
+            }),
+        );
+    }
     loop {
         if !first_request && offset >= total_bytes {
             break;
@@ -212,7 +215,7 @@ async fn receive_and_finalize(
             .checked_add(response.bytes.len() as u64)
             .ok_or_else(|| "P2P transfer byte count overflowed".to_owned())?;
         if next_offset > total_bytes
-            || (response.bytes.is_empty() && total_bytes != 0)
+            || (response.bytes.is_empty() && total_bytes != 0 && offset < total_bytes)
             || response.finished != (next_offset == total_bytes)
         {
             return Err("P2P peer returned an incomplete or oversized file block".to_owned());
@@ -233,7 +236,18 @@ async fn receive_and_finalize(
                 "transport": transport,
             }),
         );
-        if offset == total_bytes || offset.saturating_sub(last_reported) >= 1_048_576 {
+        if offset == total_bytes
+            || offset.saturating_sub(last_reported) >= 1_048_576
+            || (resume_offset > 0 && last_reported == resume_offset)
+        {
+            output
+                .flush()
+                .await
+                .map_err(|_| "Could not flush the resumable download checkpoint".to_owned())?;
+            output
+                .sync_data()
+                .await
+                .map_err(|_| "Could not persist the resumable download checkpoint".to_owned())?;
             update_transfer_state(
                 credentials,
                 transfer_id,
@@ -251,6 +265,13 @@ async fn receive_and_finalize(
 
     let actual_hash = format!("{:x}", hasher.finalize());
     if offset != total_bytes || !actual_hash.eq_ignore_ascii_case(content_hash) {
+        output.set_len(0).await.map_err(|_| {
+            "The partial file failed integrity verification and could not be reset".to_owned()
+        })?;
+        output
+            .sync_data()
+            .await
+            .map_err(|_| "The invalid partial file could not be safely reset".to_owned())?;
         return Err("The received file failed its SHA-256 integrity check".to_owned());
     }
     update_transfer_state(
@@ -292,6 +313,80 @@ async fn receive_and_finalize(
         }),
     );
     Ok(())
+}
+
+async fn open_or_resume_partial(
+    partial: &Path,
+    total_bytes: u64,
+) -> Result<(tokio::fs::File, u64, Sha256), String> {
+    let existing = match tokio::fs::symlink_metadata(partial).await {
+        Ok(metadata) => {
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                return Err("The resumable temporary path is not a regular file".to_owned());
+            }
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(_) => return Err("Could not inspect the resumable temporary file".to_owned()),
+    };
+    if !existing {
+        let file = tokio::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(partial)
+            .await
+            .map_err(|_| "Could not create a temporary file beside the destination".to_owned())?;
+        return Ok((file, 0, Sha256::new()));
+    }
+
+    let mut file = tokio::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(partial)
+        .await
+        .map_err(|_| "Could not open the resumable temporary file".to_owned())?;
+    let metadata = file
+        .metadata()
+        .await
+        .map_err(|_| "Could not inspect the resumable temporary file".to_owned())?;
+    if !metadata.is_file() || metadata.len() > total_bytes {
+        return Err("The resumable temporary file does not match the authorized size".to_owned());
+    }
+    let partial_bytes = metadata.len();
+    let modified_at = metadata.modified().ok();
+    let mut hasher = Sha256::new();
+    let mut offset = 0_u64;
+    let mut buffer = vec![0_u8; 128 * 1024];
+    file.seek(SeekFrom::Start(0))
+        .await
+        .map_err(|_| "Could not read the resumable temporary file".to_owned())?;
+    while offset < partial_bytes {
+        let read_limit = (partial_bytes - offset).min(buffer.len() as u64) as usize;
+        let read = file
+            .read(&mut buffer[..read_limit])
+            .await
+            .map_err(|_| "Could not verify the resumable temporary file".to_owned())?;
+        if read == 0 {
+            return Err(
+                "The resumable temporary file changed while it was being verified".to_owned(),
+            );
+        }
+        hasher.update(&buffer[..read]);
+        offset += read as u64;
+    }
+    let verified_metadata = file
+        .metadata()
+        .await
+        .map_err(|_| "Could not inspect the resumable temporary file".to_owned())?;
+    if verified_metadata.len() != partial_bytes || verified_metadata.modified().ok() != modified_at
+    {
+        return Err("The resumable temporary file changed while it was being verified".to_owned());
+    }
+    file.seek(SeekFrom::End(0))
+        .await
+        .map_err(|_| "Could not continue the resumable temporary file".to_owned())?;
+    Ok((file, partial_bytes, hasher))
 }
 
 pub(crate) async fn claim_source_transfer(
@@ -438,17 +533,25 @@ fn validate_destination(target: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn temporary_path(target: &Path, transfer_id: &str) -> Result<PathBuf, String> {
+fn temporary_path(target: &Path, content_hash: &str) -> Result<PathBuf, String> {
+    if content_hash.len() != 64 || !content_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("CloudFusion content checksum is invalid".to_owned());
+    }
     let parent = target
         .parent()
         .ok_or_else(|| "Choose a folder for the downloaded file".to_owned())?;
-    Ok(parent.join(format!(".cloudfusion-{transfer_id}.partial")))
+    Ok(parent.join(format!(
+        ".cloudfusion-{}.partial",
+        content_hash.to_ascii_lowercase()
+    )))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::validate_destination;
+    use super::{open_or_resume_partial, temporary_path, validate_destination};
+    use sha2::{Digest, Sha256};
     use std::{fs, path::PathBuf};
+    use tokio::io::AsyncWriteExt;
     use uuid::Uuid;
 
     #[test]
@@ -460,6 +563,45 @@ mod tests {
         fs::write(&file, b"keep").expect("existing user file writes");
         assert!(validate_destination(&file).is_err());
         assert_eq!(fs::read(&file).expect("existing file remains"), b"keep");
+        fs::remove_dir_all(PathBuf::from(directory)).expect("test directory cleans up");
+    }
+
+    #[test]
+    fn partial_path_is_stable_for_a_file_version() {
+        let directory = std::env::temp_dir().join(format!("cloudfusion-resume-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).expect("test destination exists");
+        let target = directory.join("received.bin");
+        let checksum = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+
+        let first = temporary_path(&target, checksum).expect("partial path resolves");
+        let second = temporary_path(&target, &checksum.to_ascii_uppercase())
+            .expect("uppercase checksum resolves");
+        assert_eq!(first, second);
+
+        fs::remove_dir_all(PathBuf::from(directory)).expect("test directory cleans up");
+    }
+
+    #[tokio::test]
+    async fn partial_download_reopens_and_hashes_existing_bytes() {
+        let directory = std::env::temp_dir().join(format!("cloudfusion-resume-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).expect("test destination exists");
+        let partial = directory.join(".cloudfusion-test.partial");
+        fs::write(&partial, b"abc").expect("partial bytes write");
+
+        let (mut file, offset, mut hasher) = open_or_resume_partial(&partial, 6)
+            .await
+            .expect("partial resumes");
+        assert_eq!(offset, 3);
+        file.write_all(b"def")
+            .await
+            .expect("remaining bytes append");
+        file.flush().await.expect("partial flushes");
+        hasher.update(b"def");
+        let actual = format!("{:x}", hasher.finalize());
+        let expected = format!("{:x}", Sha256::digest(b"abcdef"));
+        assert_eq!(actual, expected);
+        drop(file);
+
         fs::remove_dir_all(PathBuf::from(directory)).expect("test directory cleans up");
     }
 }

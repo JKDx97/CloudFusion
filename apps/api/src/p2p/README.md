@@ -26,12 +26,12 @@ The `1734000000000-PeerTransferCoordination` migration creates the availability 
 - Desktop only serves a file found in its bounded local index, after confirming the source path, size, modification time, and SHA-256 still match the advertised version.
 - A transfer requires the API's one-use ticket. The serving device rechecks the live API session while sending.
 - Content is exchanged in bounded blocks (at most 256 KiB per request); the receiver checks offsets, byte counts, version metadata, and SHA-256, flushes the temporary file, then atomically renames it into place. An existing destination is not overwritten on a failed or unverifiable transfer.
+- Interrupted receives keep a hidden partial beside the selected destination, keyed by the authorized content hash. Retrying the same version in the same folder resumes from the partial's locally re-read length with a fresh one-use transfer ticket; the complete SHA-256 is still required before the final rename. Invalid full partials are reset rather than installed.
 - Desktop reports the observed LAN/direct-P2P/relay route. The Drive version action tries advertised authorized peers in route order and falls back to the permission-checked CloudFusion download if none succeeds.
 
 ## Remaining work
 
-- Resuming a partial P2P transfer is not implemented; a failed receive removes its temporary partial file and a retry starts from byte zero.
-- Desktop sync folders can now upload local changes into a selected CloudFusion Drive folder, preserve remote conflicts, and advertise the verified local copy for P2P when the device allows serving files. This is local-to-cloud sync plus peer sourcing, not bidirectional peer sync; deletions are intentionally not propagated, and availability advertisements expire.
+- Desktop sync folders can now upload local changes into a selected CloudFusion Drive folder, preserve remote conflicts, and advertise the verified local copy for P2P when the device allows serving files. This is local-to-cloud sync plus peer sourcing, not bidirectional peer sync; deletions are intentionally not propagated. Desktop renews active availability leases while running and withdraws them when a copy changes or serving is disabled; offline leases expire server-side.
 - A headless/NAS deployment mode and background service lifecycle are not implemented.
 
 The web fallback is a normal browser download; it does not currently continue into the Desktop-selected P2P destination.
