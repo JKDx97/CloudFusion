@@ -1,0 +1,58 @@
+name: CloudFusion Node Linux
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/node/**"
+      - ".github/workflows/cloudfusion-node-linux.yml"
+  pull_request:
+    paths:
+      - "apps/node/**"
+      - ".github/workflows/cloudfusion-node-linux.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  node-linux:
+    name: Test and package Linux NAS node
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run node tests
+        run: cargo test --locked
+        working-directory: apps/node
+
+      - name: Build node binary
+        run: cargo build --release --locked
+        working-directory: apps/node
+
+      - name: Package binary and checksum
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          mkdir -p dist/cloudfusion-node
+          install -m 0755 apps/node/target/release/cloudfusion-node dist/cloudfusion-node/cloudfusion-node
+          cp apps/node/README.md dist/cloudfusion-node/README.md
+          tar -C dist -czf cloudfusion-node-x86_64-unknown-linux-gnu.tar.gz cloudfusion-node
+          sha256sum cloudfusion-node-x86_64-unknown-linux-gnu.tar.gz > cloudfusion-node-x86_64-unknown-linux-gnu.tar.gz.sha256
+
+      - name: Upload Linux build artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          name: cloudfusion-node-x86_64-unknown-linux-gnu
+          path: |
+            cloudfusion-node-x86_64-unknown-linux-gnu.tar.gz
+            cloudfusion-node-x86_64-unknown-linux-gnu.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 30
