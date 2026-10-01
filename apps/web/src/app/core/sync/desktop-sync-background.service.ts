@@ -40,6 +40,23 @@ interface DeviceStorageConfiguration {
   maxBytes: string | null;
 }
 
+interface DeviceStorageReplicaAssignment {
+  assignmentId: string;
+  nodeId: string;
+  versionId: string;
+  contentHash: string;
+  sizeBytes: string;
+  attempts: number;
+}
+
+interface DeviceStorageReplicaReceipt {
+  assignmentId: string;
+  nodeId: string;
+  versionId: string;
+  contentHash: string;
+  sizeBytes: string;
+}
+
 interface SyncedNodeStatus {
   status: string;
   currentVersionId: string | null;
@@ -110,6 +127,9 @@ export class DesktopSyncBackgroundService {
   private refreshInFlight?: Promise<void>;
   private remotePollTimer?: ReturnType<typeof setInterval>;
   private storageHeartbeatTimer?: ReturnType<typeof setInterval>;
+  private deviceReplicaTimer?: ReturnType<typeof setInterval>;
+  private deviceReplicaInFlight = false;
+  private deviceReplicaRetryAt = 0;
   private remotePollInFlight = false;
   private meshEnabled = false;
   private serveLocalFiles = false;
@@ -134,8 +154,11 @@ export class DesktopSyncBackgroundService {
       if (!user) {
         if (this.remotePollTimer) clearInterval(this.remotePollTimer);
         if (this.storageHeartbeatTimer) clearInterval(this.storageHeartbeatTimer);
+        if (this.deviceReplicaTimer) clearInterval(this.deviceReplicaTimer);
         this.remotePollTimer = undefined;
         this.storageHeartbeatTimer = undefined;
+        this.deviceReplicaTimer = undefined;
+        this.deviceReplicaRetryAt = 0;
         this.withdrawAllCopies(true);
         this.rootsState.set([]);
         this.lastUserId = null;
@@ -146,13 +169,16 @@ export class DesktopSyncBackgroundService {
       if (this.lastUserId && this.lastUserId !== user.id) this.withdrawAllCopies(true);
       if (this.remotePollTimer) clearInterval(this.remotePollTimer);
       if (this.storageHeartbeatTimer) clearInterval(this.storageHeartbeatTimer);
+      if (this.deviceReplicaTimer) clearInterval(this.deviceReplicaTimer);
       this.lastUserId = user.id;
       void this.refresh().then(() => {
         this.pollRemoteRoots();
         void this.reportDeviceStorageHeartbeat();
+        void this.processDeviceStorageReplica();
       });
       this.remotePollTimer = setInterval(() => void this.pollRemoteRoots(), 20_000);
       this.storageHeartbeatTimer = setInterval(() => void this.reportDeviceStorageHeartbeat(), 60_000);
+      this.deviceReplicaTimer = setInterval(() => void this.processDeviceStorageReplica(), 15_000);
     });
   }
 
@@ -229,6 +255,7 @@ export class DesktopSyncBackgroundService {
         this.invoke<DesktopSyncChange[]>('get_pending_sync_changes', { limit: 500 }),
       ]);
       this.rootsState.set(roots);
+      await this.invoke<number>('index_device_storage_files').catch(() => 0);
       await this.loadPeerSharingSettings();
       this.changes.set(pending.reverse());
       const latest = new Map<string, DesktopSyncChange>();
@@ -287,6 +314,45 @@ export class DesktopSyncBackgroundService {
       ));
     } catch {
       // A missed heartbeat expires naturally; file sync and P2P continue independently.
+    }
+  }
+
+  private async processDeviceStorageReplica(): Promise<void> {
+    const deviceId = this.auth.deviceId;
+    if (!this.isDesktop() || !deviceId || !this.lastUserId || this.deviceReplicaInFlight || Date.now() < this.deviceReplicaRetryAt) return;
+    this.deviceReplicaInFlight = true;
+    try {
+      await firstValueFrom(this.auth.ensureSession());
+      const accessToken = this.auth.accessToken;
+      if (!accessToken) return;
+      const [configuration, storageRoot] = await Promise.all([
+        firstValueFrom(this.http.get<ApiResponse<DeviceStorageConfiguration>>(`${this.apiUrl}/devices/${deviceId}/storage`)),
+        this.invoke<{ path: string } | null>('get_device_storage_root'),
+      ]);
+      if (!configuration.data.enabled || !configuration.data.maxBytes || !storageRoot) return;
+      const response = await firstValueFrom(this.http.post<ApiResponse<{ assignment: DeviceStorageReplicaAssignment | null }>>(
+        `${this.apiUrl}/p2p/storage/replicas/next`,
+        {},
+      ));
+      const assignment = response.data.assignment;
+      if (!assignment) return;
+      const receipt = await this.invoke<DeviceStorageReplicaReceipt>('store_device_replica', {
+        apiUrl: this.apiUrl,
+        accessToken,
+        maxBytes: configuration.data.maxBytes,
+        assignment,
+      });
+      await firstValueFrom(this.http.post<ApiResponse<{ status: string }>>(
+        `${this.apiUrl}/p2p/storage/replicas/${assignment.assignmentId}/complete`,
+        { contentHash: receipt.contentHash, sizeBytes: receipt.sizeBytes },
+      ));
+      await this.reportDeviceStorageHeartbeat();
+      this.deviceReplicaRetryAt = 0;
+      this.syncNotice.set('Réplica del dispositivo guardada y verificada. La copia cloud durable se mantiene intacta.');
+    } catch {
+      this.deviceReplicaRetryAt = Date.now() + 60_000;
+    } finally {
+      this.deviceReplicaInFlight = false;
     }
   }
 

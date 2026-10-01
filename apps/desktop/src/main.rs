@@ -44,6 +44,8 @@ fn main() {
             storage::choose_device_storage_folder,
             storage::set_device_storage_root,
             storage::get_device_storage_usage,
+            storage::index_device_storage_files,
+            storage::store_device_replica,
             sync::set_sync_destination,
             sync::choose_sync_folder,
             sync::add_sync_root,

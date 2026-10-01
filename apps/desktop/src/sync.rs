@@ -700,6 +700,22 @@ impl SyncState {
     pub(crate) fn shared_local_file_index(&self) -> Arc<RwLock<LocalFileIndex>> {
         Arc::clone(&self.local_file_index)
     }
+
+    pub(crate) fn insert_local_file(
+        &self,
+        content_hash: String,
+        size_bytes: u64,
+        path: PathBuf,
+    ) -> Result<(), String> {
+        if content_hash.len() != 64 || !content_hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err("File checksum is invalid".to_owned());
+        }
+        self.local_file_index
+            .write()
+            .map_err(|_| "The local file index is unavailable".to_owned())?
+            .insert((content_hash.to_ascii_lowercase(), size_bytes), path);
+        Ok(())
+    }
 }
 
 fn validate_relative_path(value: &str) -> Result<Vec<&str>, String> {
@@ -976,15 +992,22 @@ fn collect_sync_files(
 }
 
 #[tauri::command]
-pub async fn index_sync_files(state: State<'_, SyncState>) -> Result<usize, String> {
+pub async fn index_sync_files(
+    state: State<'_, SyncState>,
+    storage_state: State<'_, crate::storage::DeviceStorageState>,
+) -> Result<usize, String> {
     let roots = state
         .roots
         .lock()
         .map_err(|_| "Sync root state is unavailable".to_owned())?
         .clone();
     let index = state.shared_local_file_index();
+    let storage_root = storage_state.configured_root_path()?;
     tauri::async_runtime::spawn_blocking(move || {
-        let indexed = build_local_file_index(&roots)?;
+        let mut indexed = build_local_file_index(&roots)?;
+        if let Some(root) = storage_root {
+            indexed.extend(crate::storage::build_local_file_index(&root)?);
+        }
         let mut shared = index
             .write()
             .map_err(|_| "The local file index is unavailable".to_owned())?;
