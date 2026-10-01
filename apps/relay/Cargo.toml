@@ -7,5 +7,5 @@ rust-version = "1.88"
 
 [dependencies]
 futures = "0.3"
-libp2p = { version = "0.57.0", default-features = false, features = ["ed25519", "identify", "macros", "noise", "quic", "relay", "tcp", "tokio", "yamux"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+libp2p = { version = "0.57.0", default-features = false, features = ["cbor", "ed25519", "identify", "macros", "noise", "quic", "relay", "request-response", "tcp", "tokio", "yamux"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "time"] }

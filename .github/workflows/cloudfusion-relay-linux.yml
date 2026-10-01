@@ -1,0 +1,58 @@
+name: CloudFusion Relay Linux
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/relay/**"
+      - ".github/workflows/cloudfusion-relay-linux.yml"
+  pull_request:
+    paths:
+      - "apps/relay/**"
+      - ".github/workflows/cloudfusion-relay-linux.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  relay-linux:
+    name: Test and package Linux relay
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v7
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run relay tests
+        run: cargo test --locked
+        working-directory: apps/relay
+
+      - name: Build relay binary
+        run: cargo build --release --locked
+        working-directory: apps/relay
+
+      - name: Package binary and checksum
+        if: github.event_name != 'pull_request'
+        shell: bash
+        run: |
+          mkdir -p dist/cloudfusion-relay
+          install -m 0755 apps/relay/target/release/cloudfusion-relay dist/cloudfusion-relay/cloudfusion-relay
+          cp apps/relay/README.md dist/cloudfusion-relay/README.md
+          tar -C dist -czf cloudfusion-relay-x86_64-unknown-linux-gnu.tar.gz cloudfusion-relay
+          sha256sum cloudfusion-relay-x86_64-unknown-linux-gnu.tar.gz > cloudfusion-relay-x86_64-unknown-linux-gnu.tar.gz.sha256
+
+      - name: Upload Linux build artifact
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v7
+        with:
+          name: cloudfusion-relay-x86_64-unknown-linux-gnu
+          path: |
+            cloudfusion-relay-x86_64-unknown-linux-gnu.tar.gz
+            cloudfusion-relay-x86_64-unknown-linux-gnu.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 30
