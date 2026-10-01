@@ -37,6 +37,8 @@ pub(crate) struct NodeConfig {
     pub(crate) refresh_token: Option<String>,
     #[serde(default)]
     pub(crate) sync_roots: Vec<sync::NodeSyncRoot>,
+    #[serde(default)]
+    pub(crate) storage_root: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -125,6 +127,7 @@ async fn run() -> Result<(), String> {
             logout().await
         }
         "sync" => sync::run_command(args).await,
+        "storage" => sync::run_storage_command(args),
         "start" => {
             ensure_no_arguments(args)?;
             sync::run_daemon().await
@@ -138,7 +141,7 @@ async fn run() -> Result<(), String> {
 }
 
 fn usage() -> String {
-    "Usage:\n  cloudfusion-node login --api <https://cloudfusion.example/api>\n  cloudfusion-node status\n  cloudfusion-node sync add --path <local-folder> --remote-node-id <folder-uuid>\n  cloudfusion-node sync list\n  cloudfusion-node sync remove --root-id <root-uuid>\n  cloudfusion-node start\n  cloudfusion-node logout\n\nPair the node with a short-lived code created from CloudFusion > Dispositivos.\n`start` runs background synchronization; P2P file serving is opt-in in Dispositivos and requires an active local sync copy.".to_owned()
+    "Usage:\n  cloudfusion-node login --api <https://cloudfusion.example/api>\n  cloudfusion-node status\n  cloudfusion-node sync add --path <local-folder> --remote-node-id <folder-uuid>\n  cloudfusion-node sync list\n  cloudfusion-node sync remove --root-id <root-uuid>\n  cloudfusion-node storage set --path <dedicated-folder>\n  cloudfusion-node storage show\n  cloudfusion-node start\n  cloudfusion-node logout\n\nPair the node with a short-lived code created from CloudFusion > Dispositivos.\n`start` runs synchronization and device services; storage contributions use a separate dedicated folder and are opt-in in Dispositivos.".to_owned()
 }
 
 fn parse_api_argument(mut args: impl Iterator<Item = String>) -> Result<String, String> {
@@ -294,6 +297,10 @@ async fn status() -> Result<(), String> {
         device.storage_contribution_enabled
     );
     println!("Configured sync roots: {}", config.sync_roots.len());
+    println!(
+        "Dedicated storage folder configured: {}",
+        config.storage_root.is_some()
+    );
     Ok(())
 }
 
@@ -487,6 +494,7 @@ fn new_config(api_url: &str) -> Result<NodeConfig, String> {
         device_id: None,
         refresh_token: None,
         sync_roots: Vec::new(),
+        storage_root: None,
     };
     store_peer_private_key(&config, &peer_private_key)?;
     Ok(config)
@@ -747,6 +755,7 @@ mod tests {
             device_id: Some("device-id".to_owned()),
             refresh_token: Some("initial-token".to_owned()),
             sync_roots: Vec::new(),
+            storage_root: None,
         };
         save_config_to(&path, &config, true).unwrap();
         let saved = fs::read_to_string(&path).unwrap();

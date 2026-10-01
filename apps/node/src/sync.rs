@@ -24,6 +24,7 @@ const MAX_SYNC_FILES: usize = 50_000;
 const MAX_SYNC_DEPTH: usize = 128;
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
 const STORAGE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
+const MANAGED_STORAGE_DIR: &str = ".cloudfusion/replicas";
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -59,6 +60,22 @@ struct SyncedFile {
 #[serde(rename_all = "camelCase")]
 struct SyncManifest {
     roots: BTreeMap<String, BTreeMap<String, SyncedFile>>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceReplicaManifest {
+    entries: Vec<DeviceReplicaEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceReplicaEntry {
+    node_id: String,
+    version_id: String,
+    relative_path: String,
+    checksum: String,
+    size_bytes: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -180,6 +197,85 @@ fn usage() -> String {
     "Usage: cloudfusion-node sync add --path <local-folder> --remote-node-id <folder-uuid>\n       cloudfusion-node sync list\n       cloudfusion-node sync remove --root-id <root-uuid>".to_owned()
 }
 
+pub(crate) fn run_storage_command(mut args: impl Iterator<Item = String>) -> Result<(), String> {
+    let action = args.next().ok_or_else(storage_usage)?;
+    match action.as_str() {
+        "set" => {
+            let mut path = None;
+            while let Some(argument) = args.next() {
+                if argument == "--path" && path.is_none() {
+                    path = args.next();
+                } else {
+                    return Err(storage_usage());
+                }
+            }
+            set_storage_root(path.ok_or_else(storage_usage)?)
+        }
+        "show" => {
+            if args.next().is_some() {
+                return Err(storage_usage());
+            }
+            let config = load_config()?;
+            match config.storage_root {
+                Some(path) => {
+                    let used = dedicated_storage_bytes(&path)?;
+                    println!("Dedicated storage folder: {path}");
+                    println!("Managed replica bytes: {used}");
+                }
+                None => println!("No dedicated storage folder configured."),
+            }
+            Ok(())
+        }
+        _ => Err(storage_usage()),
+    }
+}
+
+fn storage_usage() -> String {
+    "Usage: cloudfusion-node storage set --path <dedicated-folder>\n       cloudfusion-node storage show".to_owned()
+}
+
+fn set_storage_root(path: String) -> Result<(), String> {
+    let input = PathBuf::from(&path);
+    let metadata = fs::symlink_metadata(&input)
+        .map_err(|_| "Dedicated storage folder does not exist".to_owned())?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(
+            "Dedicated storage path must be a real directory, not a symbolic link".to_owned(),
+        );
+    }
+    let canonical = fs::canonicalize(&input)
+        .map_err(|_| "Could not resolve the dedicated storage folder".to_owned())?;
+    if canonical.to_string_lossy().len() > 2048 {
+        return Err("Dedicated storage folder path is too long".to_owned());
+    }
+    let mut config = load_config()?;
+    if config
+        .sync_roots
+        .iter()
+        .any(|root| paths_overlap(Path::new(&root.path), &canonical))
+    {
+        return Err(
+            "Dedicated storage must be separate from all CloudFusion sync folders".to_owned(),
+        );
+    }
+    if let Some(previous) = config.storage_root.as_deref() {
+        if !paths_overlap(Path::new(previous), &canonical) && dedicated_storage_bytes(previous)? > 0
+        {
+            return Err("This NAS already holds managed replicas in its dedicated folder. Back them up before changing the folder".to_owned());
+        }
+    }
+    prepare_replica_directory(&canonical)?;
+    config.storage_root = Some(canonical.to_string_lossy().into_owned());
+    save_config(&config)?;
+    println!("Dedicated device storage configured locally.");
+    println!(
+        "Path: {}",
+        config.storage_root.as_deref().unwrap_or_default()
+    );
+    println!("The path is not sent to CloudFusion's API.");
+    Ok(())
+}
+
 fn paths_overlap(left: &Path, right: &Path) -> bool {
     #[cfg(windows)]
     fn parts(path: &Path) -> Vec<String> {
@@ -229,6 +325,15 @@ async fn add_root(path: String, remote_node_id: String) -> Result<(), String> {
                 .to_owned(),
         );
     }
+    if config
+        .storage_root
+        .as_deref()
+        .is_some_and(|path| paths_overlap(Path::new(path), &canonical_path))
+    {
+        return Err(
+            "Sync folders must be separate from the dedicated replica storage folder".to_owned(),
+        );
+    }
     let client = build_client()?;
     let session = refresh_session(&client, &mut config).await?;
     let node: RemoteNode = get_json(
@@ -276,14 +381,16 @@ pub(crate) async fn run_daemon() -> Result<(), String> {
     if config.refresh_token.is_none() {
         return Err("Node is not paired; run cloudfusion-node login first".to_owned());
     }
-    if config.sync_roots.is_empty() {
+    if config.sync_roots.is_empty() && config.storage_root.is_none() {
         return Err(
-            "No sync folders configured; add a folder with `cloudfusion-node sync add`".to_owned(),
+            "Configure a sync folder or a dedicated replica folder before starting the node"
+                .to_owned(),
         );
     }
     println!(
-        "CloudFusion NAS sync running for {} folder(s). Press Ctrl+C to stop.",
-        config.sync_roots.len()
+        "CloudFusion NAS device services running ({} sync folder(s), dedicated storage: {}). Press Ctrl+C to stop.",
+        config.sync_roots.len(),
+        if config.storage_root.is_some() { "configured" } else { "not configured" }
     );
     let client = build_client()?;
     let session = refresh_session(&client, &mut config).await?;
@@ -310,7 +417,7 @@ pub(crate) async fn run_daemon() -> Result<(), String> {
         client.clone(),
         config.api_url.clone(),
         device_id.clone(),
-        config.sync_roots.clone(),
+        config.storage_root.clone(),
         credentials_rx.clone(),
         storage_stop_rx,
     ));
@@ -374,7 +481,7 @@ async fn run_storage_heartbeat_worker(
     client: Client,
     api_url: String,
     device_id: String,
-    roots: Vec<NodeSyncRoot>,
+    storage_root: Option<String>,
     mut credentials: watch::Receiver<crate::mesh::MeshCredentials>,
     mut shutdown: watch::Receiver<bool>,
 ) {
@@ -393,7 +500,7 @@ async fn run_storage_heartbeat_worker(
                         &client,
                         &api_url,
                         &device_id,
-                        &roots,
+                        storage_root.as_deref(),
                         &current.access_token,
                     ),
                 ).await {
@@ -420,7 +527,7 @@ async fn report_storage_heartbeat(
     client: &Client,
     api_url: &str,
     device_id: &str,
-    roots: &[NodeSyncRoot],
+    storage_root: Option<&str>,
     access_token: &str,
 ) -> Result<(), String> {
     let configuration: DeviceStorageConfiguration = get_json(
@@ -438,10 +545,12 @@ async fn report_storage_heartbeat(
         .as_deref()
         .and_then(|value| value.parse::<u64>().ok())
         .ok_or_else(|| "enabled device storage has no valid capacity".to_owned())?;
-    let used_bytes = synchronized_local_storage_bytes(roots)?;
+    let storage_root = storage_root
+        .ok_or_else(|| "Device storage is enabled on the server, but this NAS has no dedicated folder configured".to_owned())?;
+    let used_bytes = dedicated_storage_bytes(storage_root)?;
     if used_bytes > max_bytes {
         return Err(format!(
-            "CloudFusion sync files use {used_bytes} bytes, above this device's configured {max_bytes}-byte limit"
+            "Managed device replicas use {used_bytes} bytes, above this device's configured {max_bytes}-byte limit"
         ));
     }
     let _: DeviceStorageConfiguration = post_authorized_json(
@@ -1553,51 +1662,92 @@ pub(crate) async fn verified_local_files(
     Ok(files)
 }
 
-fn synchronized_local_storage_bytes(roots: &[NodeSyncRoot]) -> Result<u64, String> {
-    let manifest = load_manifest()?;
-    storage_bytes_for_manifest(roots, &manifest)
+fn prepare_replica_directory(root: &Path) -> Result<PathBuf, String> {
+    let metadata = fs::symlink_metadata(root)
+        .map_err(|_| "Dedicated storage folder is unavailable".to_owned())?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("Dedicated storage folder is not a safe directory".to_owned());
+    }
+    let metadata_dir = root.join(".cloudfusion");
+    ensure_safe_storage_directory(&metadata_dir)?;
+    let replica_dir = metadata_dir.join("replicas");
+    ensure_safe_storage_directory(&replica_dir)?;
+    Ok(replica_dir)
 }
 
-fn storage_bytes_for_manifest(
-    roots: &[NodeSyncRoot],
-    manifest: &SyncManifest,
-) -> Result<u64, String> {
-    if roots.is_empty() {
-        return Err(
-            "Storage contribution requires at least one configured CloudFusion sync folder"
-                .to_owned(),
-        );
+fn ensure_safe_storage_directory(path: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            Err("A managed device storage folder is not a safe directory".to_owned())
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => fs::create_dir(path)
+            .map_err(|_| "Could not prepare the dedicated replica folder".to_owned()),
+        Err(_) => Err("Could not inspect a managed device storage folder".to_owned()),
     }
-    let mut total = 0u64;
-    for root in roots {
-        validate_root(root)?;
-        let root_path = PathBuf::from(&root.path);
-        let root_metadata = fs::symlink_metadata(&root_path)
-            .map_err(|_| "A configured CloudFusion sync folder is unavailable".to_owned())?;
-        if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
-            return Err("A configured CloudFusion sync folder is not a safe directory".to_owned());
-        }
-        let Some(entries) = manifest.roots.get(&root.id) else {
-            continue;
-        };
-        for (relative, entry) in entries {
-            let path = match safe_target(&root.path, relative, false) {
-                Ok(path) => path,
-                Err(_) => continue,
-            };
-            let metadata = match fs::symlink_metadata(path) {
-                Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => {
-                    metadata
-                }
-                _ => continue,
-            };
-            if metadata.len() != entry.size {
-                continue;
+}
+
+fn dedicated_storage_bytes(root: &str) -> Result<u64, String> {
+    let replica_dir = PathBuf::from(root).join(MANAGED_STORAGE_DIR);
+    let root_metadata = fs::symlink_metadata(root)
+        .map_err(|_| "Dedicated storage folder is unavailable".to_owned())?;
+    if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+        return Err("Dedicated storage folder is not a safe directory".to_owned());
+    }
+    for parent in [
+        PathBuf::from(root).join(".cloudfusion"),
+        replica_dir.clone(),
+    ] {
+        match fs::symlink_metadata(&parent) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err("A managed device storage folder is not a safe directory".to_owned());
             }
-            total = total
-                .checked_add(metadata.len())
-                .ok_or_else(|| "CloudFusion-managed storage usage overflowed".to_owned())?;
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+            Err(_) => return Err("Could not inspect the dedicated replica folder".to_owned()),
         }
+    }
+    let manifest_path = replica_dir.join("manifest.json");
+    let metadata = match fs::symlink_metadata(&manifest_path) {
+        Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => metadata,
+        Ok(_) => return Err("Device replica manifest is not a safe regular file".to_owned()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(_) => return Err("Could not inspect the device replica manifest".to_owned()),
+    };
+    if metadata.len() > MAX_MANIFEST_BYTES {
+        return Err("Device replica manifest exceeds the safe size limit".to_owned());
+    }
+    let bytes = fs::read(&manifest_path)
+        .map_err(|_| "Could not read the device replica manifest".to_owned())?;
+    let manifest: DeviceReplicaManifest = serde_json::from_slice(&bytes)
+        .map_err(|_| "Device replica manifest is invalid".to_owned())?;
+    let mut total = 0u64;
+    for entry in manifest.entries {
+        if entry.relative_path.is_empty()
+            || entry
+                .relative_path
+                .chars()
+                .any(|character| matches!(character, '/' | '\\' | ':'))
+            || entry.relative_path == "."
+            || entry.relative_path == ".."
+            || Uuid::parse_str(&entry.node_id).is_err()
+            || Uuid::parse_str(&entry.version_id).is_err()
+            || entry.checksum.len() != 64
+            || !entry.checksum.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            continue;
+        }
+        let path = replica_dir.join(entry.relative_path);
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => metadata,
+            _ => continue,
+        };
+        if metadata.len() != entry.size_bytes {
+            continue;
+        }
+        total = total
+            .checked_add(metadata.len())
+            .ok_or_else(|| "Managed replica storage usage overflowed".to_owned())?;
     }
     Ok(total)
 }
@@ -1662,8 +1812,8 @@ fn validate_manifest_parent(parent: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        storage_bytes_for_manifest, unique_conflict_path, validate_relative_path, NodeSyncRoot,
-        SyncManifest, SyncedFile,
+        dedicated_storage_bytes, paths_overlap, unique_conflict_path, validate_relative_path,
+        DeviceReplicaEntry, DeviceReplicaManifest, SyncManifest, SyncedFile,
     };
     use std::{collections::BTreeMap, fs};
     use uuid::Uuid;
@@ -1717,52 +1867,61 @@ mod tests {
     }
 
     #[test]
-    fn storage_usage_counts_only_present_cloudfusion_managed_files_with_expected_sizes() {
+    fn dedicated_storage_counts_only_manifested_files_with_the_expected_size() {
         let directory =
             std::env::temp_dir().join(format!("cloudfusion-storage-{}", Uuid::new_v4()));
-        fs::create_dir(&directory).unwrap();
-        fs::write(directory.join("managed.txt"), b"managed").unwrap();
-        fs::write(directory.join("changed.txt"), b"changed size").unwrap();
-        fs::write(directory.join("untracked.txt"), b"not in the sync manifest").unwrap();
-
-        let root_id = Uuid::new_v4().to_string();
-        let root = NodeSyncRoot {
-            id: root_id.clone(),
-            path: directory.to_string_lossy().into_owned(),
-            remote_node_id: Uuid::new_v4().to_string(),
+        let replica_dir = directory.join(".cloudfusion/replicas");
+        fs::create_dir_all(&replica_dir).unwrap();
+        fs::write(replica_dir.join("managed.blob"), b"managed").unwrap();
+        fs::write(replica_dir.join("changed.blob"), b"changed size").unwrap();
+        fs::write(
+            replica_dir.join("untracked.blob"),
+            b"not in the replica manifest",
+        )
+        .unwrap();
+        let manifest = DeviceReplicaManifest {
+            entries: vec![
+                DeviceReplicaEntry {
+                    node_id: Uuid::new_v4().to_string(),
+                    version_id: Uuid::new_v4().to_string(),
+                    relative_path: "managed.blob".into(),
+                    checksum: "a".repeat(64),
+                    size_bytes: 7,
+                },
+                DeviceReplicaEntry {
+                    node_id: Uuid::new_v4().to_string(),
+                    version_id: Uuid::new_v4().to_string(),
+                    relative_path: "changed.blob".into(),
+                    checksum: "b".repeat(64),
+                    size_bytes: 1,
+                },
+                DeviceReplicaEntry {
+                    node_id: Uuid::new_v4().to_string(),
+                    version_id: Uuid::new_v4().to_string(),
+                    relative_path: "../escape".into(),
+                    checksum: "c".repeat(64),
+                    size_bytes: 100,
+                },
+            ],
         };
-        let file = |size| SyncedFile {
-            remote_path: "unused".to_owned(),
-            node_id: "node".to_owned(),
-            version_id: "version".to_owned(),
-            checksum: "a".repeat(64),
-            size,
-            version_number: 1,
-            local_modified_ns: None,
-        };
-        let manifest = SyncManifest {
-            roots: BTreeMap::from([(
-                root_id,
-                BTreeMap::from([
-                    ("managed.txt".to_owned(), file(7)),
-                    ("changed.txt".to_owned(), file(1)),
-                    ("missing.txt".to_owned(), file(20)),
-                    ("untracked.txt".to_owned(), file(25)),
-                ]),
-            )]),
-        };
+        fs::write(
+            replica_dir.join("manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
 
-        let used = storage_bytes_for_manifest(&[root], &manifest).unwrap();
-
-        assert_eq!(used, 7);
+        assert_eq!(
+            dedicated_storage_bytes(directory.to_str().unwrap()).unwrap(),
+            7
+        );
         fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
-    fn storage_usage_requires_a_configured_cloudfusion_sync_root() {
-        let error = storage_bytes_for_manifest(&[], &SyncManifest::default())
-            .expect_err("storage contribution cannot run without a managed sync root");
-
-        assert!(error.contains("configured CloudFusion sync folder"));
+    fn storage_folder_must_not_overlap_a_sync_folder() {
+        let root = std::env::temp_dir().join(format!("cloudfusion-overlap-{}", Uuid::new_v4()));
+        assert!(paths_overlap(&root, &root.join("sync")));
+        assert!(paths_overlap(&root.join("sync"), &root));
+        assert!(!paths_overlap(&root.join("sync"), &root.join("storage")));
     }
 }
