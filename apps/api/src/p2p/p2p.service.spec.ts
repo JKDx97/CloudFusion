@@ -160,7 +160,7 @@ describe('P2pService transfer coordination', () => {
     expect(ctx.availability.save).not.toHaveBeenCalled();
   });
 
-  it('issues a short-lived ticket bound to both devices and one exact version', async () => {
+  it('issues a short-lived ticket for a cross-user peer only when both users can read the exact version', async () => {
     const ctx = makeService();
     const result = await ctx.service.authorizeTransfer('destination-user', 'destination-device', {
       sourceDeviceId: 'source-device', nodeId: 'node-id', versionId: 'version-id',
@@ -173,6 +173,13 @@ describe('P2pService transfer coordination', () => {
     }), expect.objectContaining({ expiresIn: 120, algorithm: 'HS256' }));
     expect(result.ticket).toBe('signed-short-lived-ticket');
     expect(result.transfer.status).toBe(PeerTransferStatus.AUTHORIZED);
+    expect(ctx.transfers.save).toHaveBeenCalledWith(expect.objectContaining({
+      sourceUserId: 'source-user', destinationUserId: 'destination-user',
+      sourceDeviceId: 'source-device', destinationDeviceId: 'destination-device',
+      nodeId: 'node-id', versionId: 'version-id',
+    }));
+    expect(ctx.permissions.canDownload).toHaveBeenNthCalledWith(1, 'destination-user', 'node-id');
+    expect(ctx.permissions.canDownload).toHaveBeenNthCalledWith(2, 'source-user', 'node-id');
     expect(ctx.audit.record).toHaveBeenCalledWith('destination-user', 'P2P_TRANSFER_AUTHORIZED', 'PeerTransferSession', 'transfer-id', expect.any(Object));
   });
 

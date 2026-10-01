@@ -453,15 +453,13 @@ async fn run_lan_mesh(
         tokio::select! {
             command = command_rx.recv() => {
                 if let Some(command) = command {
-                    if !is_trusted(&trusted_peer_ids, &command.peer_id) {
-                        let _ = command.response.send(Err("This device is not trusted by CloudFusion".to_owned()));
-                    } else {
-                        if let Some(address) = relay_address.as_ref().and_then(|relay| relay_peer_address(relay, &command.peer_id)) {
-                            swarm.add_peer_address(command.peer_id.clone(), address);
-                        }
-                        let request_id = swarm.behaviour_mut().transfer.send_request(&command.peer_id, command.request);
-                        pending_requests.insert(request_id, command.response);
+                    // The caller only gets peer IDs from CloudFusion's permission-filtered
+                    // availability list and must attach a one-use transfer ticket.
+                    if let Some(address) = relay_address.as_ref().and_then(|relay| relay_peer_address(relay, &command.peer_id)) {
+                        swarm.add_peer_address(command.peer_id.clone(), address);
                     }
+                    let request_id = swarm.behaviour_mut().transfer.send_request(&command.peer_id, command.request);
+                    pending_requests.insert(request_id, command.response);
                 }
             }
             changed = stop_rx.changed() => {
@@ -472,21 +470,17 @@ async fn run_lan_mesh(
             event = swarm.select_next_some() => match event {
                 SwarmEvent::Behaviour(MeshEvent::Mdns(mdns::Event::Discovered(peers))) => {
                     for (peer_id, address) in peers {
-                        if peer_id == local_peer_id || !is_trusted(&trusted_peer_ids, &peer_id) {
+                        if peer_id == local_peer_id {
                             continue;
                         }
                         lan_peer_addresses.entry(peer_id.clone()).or_default().insert(address.clone());
-                        let _ = app.emit("mesh-peer-update", MeshPeerUpdate {
-                            peer_id: peer_id.to_string(),
-                            status: "discovered".to_owned(),
-                            multiaddr: Some(address.to_string()),
-                        });
-                        let address = address.with(Protocol::P2p(peer_id.clone()));
-                        if let Err(error) = swarm.dial(address) {
+                        // mDNS supplies this temporary route to libp2p. Do not connect
+                        // until an API-authorized transfer targets this PeerId.
+                        if is_trusted(&trusted_peer_ids, &peer_id) {
                             let _ = app.emit("mesh-peer-update", MeshPeerUpdate {
                                 peer_id: peer_id.to_string(),
-                                status: format!("unreachable:{error}"),
-                                multiaddr: None,
+                                status: "discovered".to_owned(),
+                                multiaddr: Some(address.to_string()),
                             });
                         }
                     }
@@ -515,7 +509,6 @@ async fn run_lan_mesh(
                                 peer,
                                 request,
                                 local_peer_id,
-                                &trusted_peer_ids,
                                 &local_file_index,
                                 &api_credentials,
                                 &mut source_transfers,
@@ -559,7 +552,7 @@ async fn run_lan_mesh(
                                 let _ = app.emit("mesh-status", "relay-reserving");
                             }
                         }
-                    } else if is_trusted(&trusted_peer_ids, &peer_id) {
+                    } else {
                         let transport = if endpoint.is_relayed() {
                             "P2P_RELAY"
                         } else if lan_peer_addresses.contains_key(&peer_id) {
@@ -574,8 +567,6 @@ async fn run_lan_mesh(
                             status: format!("connected:{transport}"),
                             multiaddr: Some(endpoint.get_remote_address().to_string()),
                         });
-                    } else {
-                        let _ = swarm.disconnect_peer_id(peer_id);
                     }
                 }
                 SwarmEvent::ConnectionClosed { peer_id, connection_id, num_established, .. } => {
@@ -698,15 +689,11 @@ async fn serve_chunk_request(
     peer_id: PeerId,
     request: ChunkRequest,
     local_peer_id: PeerId,
-    trusted_peer_ids: &RwLock<HashSet<String>>,
     local_file_index: &RwLock<super::sync::LocalFileIndex>,
     api_credentials: &RwLock<Option<MeshApiCredentials>>,
     transfers: &mut HashMap<String, SourceTransfer>,
 ) -> ChunkResponse {
     let fail = |message: &str| ChunkResponse::failure(&request, message);
-    if !is_trusted(trusted_peer_ids, &peer_id) {
-        return fail("Sender device is not trusted");
-    }
     if uuid::Uuid::parse_str(&request.transfer_id).is_err()
         || request.content_hash.len() != 64
         || !request

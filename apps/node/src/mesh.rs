@@ -702,21 +702,12 @@ pub(crate) async fn run_mesh(
             wait_for_poll(&mut credentials, &mut shutdown).await?;
             continue;
         }
-        let trusted = devices
-            .iter()
-            .filter(|candidate| {
-                candidate.id != device.id && candidate.p2p_enabled && candidate.revoked_at.is_none()
-            })
-            .filter_map(|candidate| candidate.peer_id.clone())
-            .filter(|peer| PeerId::from_str(peer).is_ok())
-            .collect::<HashSet<_>>();
         let initial_settings = device.clone();
         run_mesh_active(
             &client,
             &config,
             keypair.clone(),
             initial_settings,
-            trusted,
             credentials.clone(),
             shutdown.clone(),
             handle.clone(),
@@ -776,7 +767,6 @@ async fn run_mesh_active(
     config: &NodeConfig,
     keypair: Keypair,
     mut settings: DeviceSettings,
-    mut trusted: HashSet<String>,
     mut credentials: watch::Receiver<MeshCredentials>,
     mut shutdown: watch::Receiver<bool>,
     handle: MeshHandle,
@@ -866,17 +856,15 @@ async fn run_mesh_active(
             }
             command = commands.recv() => {
                 if let Some(command) = command {
-                    if !trusted.contains(&command.peer_id.to_string()) {
-                        let _ = command.response.send(Err("The source device is not trusted by CloudFusion".to_owned()));
-                    } else {
-                        if !handle.is_peer_connected(&command.peer_id) {
-                            if let Some(address) = relay_address.as_ref().and_then(|relay| relay_peer_address(relay, &command.peer_id)) {
-                                swarm.add_peer_address(command.peer_id.clone(), address);
-                            }
+                    // The sync caller selects this peer from CloudFusion's
+                    // permission-filtered availability response and presents a ticket.
+                    if !handle.is_peer_connected(&command.peer_id) {
+                        if let Some(address) = relay_address.as_ref().and_then(|relay| relay_peer_address(relay, &command.peer_id)) {
+                            swarm.add_peer_address(command.peer_id.clone(), address);
                         }
-                        let request_id = swarm.behaviour_mut().transfer.send_request(&command.peer_id, command.request);
-                        pending_requests.insert(request_id, command.response);
                     }
+                    let request_id = swarm.behaviour_mut().transfer.send_request(&command.peer_id, command.request);
+                    pending_requests.insert(request_id, command.response);
                 }
             }
             _ = poll.tick() => {
@@ -891,14 +879,14 @@ async fn run_mesh_active(
                     break 'mesh_loop;
                 }
                 settings = current.clone();
-                trusted = devices.iter().filter(|candidate| candidate.id != settings.id && candidate.p2p_enabled && candidate.revoked_at.is_none()).filter_map(|candidate| candidate.peer_id.clone()).filter(|peer| PeerId::from_str(peer).is_ok()).collect();
             }
             event = swarm.select_next_some() => match event {
                 SwarmEvent::Behaviour(MeshEvent::Mdns(mdns::Event::Discovered(peers))) => {
                     for (peer_id, address) in peers {
-                        if peer_id == local_peer_id || !trusted.contains(&peer_id.to_string()) { continue; }
+                        if peer_id == local_peer_id { continue; }
                         lan_peer_addresses.entry(peer_id.clone()).or_default().insert(address.clone());
-                        let _ = swarm.dial(address.with(Protocol::P2p(peer_id)));
+                        // mDNS supplies a temporary route; libp2p dials it only when
+                        // the sync engine issues an API-authorized version request.
                     }
                 }
                 SwarmEvent::Behaviour(MeshEvent::Mdns(mdns::Event::Expired(peers))) => {
@@ -909,7 +897,7 @@ async fn run_mesh_active(
                 SwarmEvent::Behaviour(MeshEvent::Transfer(request_response::Event::Message { peer, message, .. })) => match message {
                     Message::Request { request, channel, .. } => {
                         let auth = credentials.borrow().clone();
-                        let response = serve_chunk_request(peer, request, local_peer_id, &trusted, &local_file_index, client, &auth, &mut source_transfers).await;
+                        let response = serve_chunk_request(peer, request, local_peer_id, &local_file_index, client, &auth, &mut source_transfers).await;
                         let _ = swarm.behaviour_mut().transfer.send_response(channel, response);
                     }
                     Message::Response { request_id, response } => {
@@ -928,8 +916,6 @@ async fn run_mesh_active(
                 SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
                     if Some(peer_id) == relay_peer_id {
                         if let Some(address) = relay_address.as_ref() { let _ = swarm.listen_on(address.clone().with(Protocol::P2pCircuit)); }
-                    } else if !trusted.contains(&peer_id.to_string()) {
-                        let _ = swarm.disconnect_peer_id(peer_id);
                     } else {
                         let transport = if endpoint.is_relayed() {
                             eprintln!("P2P peer connected through relay");
@@ -1114,7 +1100,6 @@ async fn serve_chunk_request(
     peer_id: PeerId,
     request: ChunkRequest,
     local_peer_id: PeerId,
-    trusted_peer_ids: &HashSet<String>,
     local_file_index: &std::sync::Arc<
         std::sync::RwLock<HashMap<(String, u64), std::path::PathBuf>>,
     >,
@@ -1123,9 +1108,6 @@ async fn serve_chunk_request(
     transfers: &mut HashMap<String, SourceTransfer>,
 ) -> ChunkResponse {
     let fail = |reason: &str| ChunkResponse::failure(&request, reason);
-    if !trusted_peer_ids.contains(&peer_id.to_string()) {
-        return fail("Sender device is not trusted");
-    }
     if Uuid::parse_str(&request.transfer_id).is_err()
         || request.content_hash.len() != 64
         || !request

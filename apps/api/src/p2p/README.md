@@ -11,7 +11,7 @@ This module is the control plane for peer transfers. The server keeps file-versi
 - `POST /p2p/transfers/:id/claim` consumes the ticket only on its named source device and rechecks both device sessions, revocation, version and read permissions.
 - `GET /p2p/transfers/:id`, `POST /p2p/transfers/:id/state`, and `POST /p2p/transfers/:id/cancel` are scoped to the two participating device sessions.
 
-Viewer/read access is sufficient for a download. Public-link transfers deliberately do not use personal devices as sources. A receiver alone can advance a session to `VERIFYING`/`COMPLETED`, and completion requires the exact authorized byte count. The Desktop receiver also verifies the full SHA-256 before it marks a transfer complete.
+Viewer/read access is sufficient for a download. This includes cross-user Workspace or resource-share access: the destination and source users are checked independently by the permission engine, and the checks are repeated when the source claims the ticket. Public-link transfers deliberately do not use personal devices as sources. A receiver alone can advance a session to `VERIFYING`/`COMPLETED`, and completion requires the exact authorized byte count. The Desktop receiver also verifies the full SHA-256 before it marks a transfer complete. mDNS only contributes temporary routes; neither LAN presence nor an account-local peer list grants transfer authorization.
 
 ## Configuration
 
