@@ -1,4 +1,5 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
+use keyring::Entry;
 use libp2p::identity::Keypair;
 use reqwest::{header, Client, Url};
 use serde::{Deserialize, Serialize};
@@ -16,8 +17,11 @@ mod sync;
 
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const MAX_CONFIG_BYTES: u64 = 128 * 1024;
+const KEYRING_SERVICE: &str = "com.cloudfusion.node";
+const PEER_PRIVATE_KEY_CREDENTIAL: &str = "peer-private-key-ed25519";
+const REFRESH_TOKEN_CREDENTIAL: &str = "refresh-token";
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct NodeConfig {
     pub(crate) api_url: String,
@@ -25,10 +29,11 @@ pub(crate) struct NodeConfig {
     pub(crate) name: String,
     pub(crate) peer_id: String,
     pub(crate) peer_public_key: String,
+    #[serde(default, skip_serializing)]
     pub(crate) peer_private_key: String,
     #[serde(default)]
     pub(crate) device_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub(crate) refresh_token: Option<String>,
     #[serde(default)]
     pub(crate) sync_roots: Vec<sync::NodeSyncRoot>,
@@ -238,6 +243,7 @@ async fn login(api_url: &str) -> Result<(), String> {
         post_json(&client, &config.api_url, "/auth/device-pair", &request).await?;
     validate_session(&session)?;
     config.device_id = Some(session.device_id);
+    store_refresh_token(&config, &session.refresh_token)?;
     config.refresh_token = Some(session.refresh_token);
     save_config(&config)?;
     println!("Paired successfully.");
@@ -247,7 +253,7 @@ async fn login(api_url: &str) -> Result<(), String> {
         config.device_id.as_deref().unwrap_or_default()
     );
     println!("Peer ID: {}", config.peer_id);
-    println!("Credential file: {}", config_path()?.display());
+    println!("Configuration file: {}", config_path()?.display());
     println!("No token or private key was printed.");
     Ok(())
 }
@@ -306,6 +312,7 @@ async fn logout() -> Result<(), String> {
     if !receipt.logged_out {
         return Err("The API did not confirm revocation of the node session".to_owned());
     }
+    delete_refresh_token(&config)?;
     config.refresh_token = None;
     save_config(&config)?;
     println!("The CloudFusion node session was revoked. Its installation and peer identity were retained.");
@@ -332,6 +339,7 @@ pub(crate) async fn refresh_session(
         return Err("The API returned a session for a different device identity".to_owned());
     }
     config.device_id = Some(session.device_id.clone());
+    store_refresh_token(config, &session.refresh_token)?;
     config.refresh_token = Some(session.refresh_token.clone());
     save_config(config)?;
     Ok(session)
@@ -465,25 +473,117 @@ fn new_config(api_url: &str) -> Result<NodeConfig, String> {
     } else {
         format!("{safe_host_name} (CloudFusion NAS)")
     };
-    Ok(NodeConfig {
+    let installation_id = Uuid::new_v4().to_string();
+    let peer_private_key = keypair
+        .to_protobuf_encoding()
+        .map_err(|_| "Could not create the node's cryptographic identity".to_owned())?;
+    let config = NodeConfig {
         api_url: api_url.to_owned(),
-        installation_id: Uuid::new_v4().to_string(),
+        installation_id,
         name,
         peer_id: keypair.public().to_peer_id().to_string(),
         peer_public_key,
-        peer_private_key: STANDARD.encode(
-            keypair
-                .to_protobuf_encoding()
-                .map_err(|_| "Could not create the node's cryptographic identity".to_owned())?,
-        ),
+        peer_private_key: STANDARD.encode(&peer_private_key),
         device_id: None,
         refresh_token: None,
         sync_roots: Vec::new(),
-    })
+    };
+    store_peer_private_key(&config, &peer_private_key)?;
+    Ok(config)
 }
 
 pub(crate) fn load_config() -> Result<NodeConfig, String> {
-    load_config_from(&config_path()?)
+    let path = config_path()?;
+    let mut config = load_config_from(&path)?;
+    let legacy_secrets_present =
+        !config.peer_private_key.is_empty() || config.refresh_token.is_some();
+    hydrate_credentials(&mut config)?;
+    if legacy_secrets_present {
+        save_config(&config)?;
+    }
+    Ok(config)
+}
+
+fn hydrate_credentials(config: &mut NodeConfig) -> Result<(), String> {
+    Uuid::parse_str(&config.installation_id)
+        .map_err(|_| "The node installation identity is invalid".to_owned())?;
+
+    let private_key_entry = credential_entry(config, PEER_PRIVATE_KEY_CREDENTIAL)?;
+    let private_key = match private_key_entry.get_secret() {
+        Ok(secret) => secret,
+        Err(keyring::Error::NoEntry) if !config.peer_private_key.is_empty() => {
+            let secret = STANDARD
+                .decode(&config.peer_private_key)
+                .map_err(|_| "The saved node identity is invalid".to_owned())?;
+            private_key_entry
+                .set_secret(&secret)
+                .map_err(|_| keyring_error())?;
+            secret
+        }
+        Err(keyring::Error::NoEntry) => {
+            return Err("The node's private identity is missing from the operating system's secure credential store".to_owned());
+        }
+        Err(_) => return Err(keyring_error()),
+    };
+    let keypair = Keypair::from_protobuf_encoding(&private_key)
+        .map_err(|_| "The saved node identity is invalid".to_owned())?;
+    if keypair.public().to_peer_id().to_string() != config.peer_id
+        || STANDARD.encode(keypair.public().encode_protobuf()) != config.peer_public_key
+    {
+        return Err("The saved node identity failed its integrity check".to_owned());
+    }
+    config.peer_private_key = STANDARD.encode(private_key);
+
+    let refresh_entry = credential_entry(config, REFRESH_TOKEN_CREDENTIAL)?;
+    config.refresh_token = match refresh_entry.get_password() {
+        Ok(token) => Some(token),
+        Err(keyring::Error::NoEntry) => {
+            if let Some(legacy_token) = config.refresh_token.as_deref() {
+                if legacy_token.trim().is_empty() || legacy_token.len() > 16_384 {
+                    return Err("The saved node session credential is invalid".to_owned());
+                }
+                refresh_entry
+                    .set_password(legacy_token)
+                    .map_err(|_| keyring_error())?;
+                Some(legacy_token.to_owned())
+            } else {
+                None
+            }
+        }
+        Err(_) => return Err(keyring_error()),
+    };
+    Ok(())
+}
+
+fn credential_entry(config: &NodeConfig, credential: &str) -> Result<Entry, String> {
+    Entry::new(
+        KEYRING_SERVICE,
+        &format!("{}:{credential}", config.installation_id),
+    )
+    .map_err(|_| keyring_error())
+}
+
+fn store_peer_private_key(config: &NodeConfig, private_key: &[u8]) -> Result<(), String> {
+    credential_entry(config, PEER_PRIVATE_KEY_CREDENTIAL)?
+        .set_secret(private_key)
+        .map_err(|_| keyring_error())
+}
+
+fn store_refresh_token(config: &NodeConfig, refresh_token: &str) -> Result<(), String> {
+    credential_entry(config, REFRESH_TOKEN_CREDENTIAL)?
+        .set_password(refresh_token)
+        .map_err(|_| keyring_error())
+}
+
+fn delete_refresh_token(config: &NodeConfig) -> Result<(), String> {
+    match credential_entry(config, REFRESH_TOKEN_CREDENTIAL)?.delete_credential() {
+        Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+        Err(_) => Err(keyring_error()),
+    }
+}
+
+fn keyring_error() -> String {
+    "The operating system's secure credential store is unavailable. On headless Linux, configure a Secret Service/keyring for the node service account; CloudFusion will not save these secrets in plaintext.".to_owned()
 }
 
 fn load_config_from(path: &Path) -> Result<NodeConfig, String> {
@@ -492,7 +592,7 @@ fn load_config_from(path: &Path) -> Result<NodeConfig, String> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Err("Node is not paired".to_owned());
         }
-        Err(_) => return Err("Could not read the node credential file".to_owned()),
+        Err(_) => return Err("Could not read the node configuration file".to_owned()),
     };
     if metadata.file_type().is_symlink() || !metadata.is_file() || metadata.len() > MAX_CONFIG_BYTES
     {
@@ -508,8 +608,9 @@ fn load_config_from(path: &Path) -> Result<NodeConfig, String> {
             ));
         }
     }
-    let bytes = fs::read(path).map_err(|_| "Could not read the node credential file".to_owned())?;
-    serde_json::from_slice(&bytes).map_err(|_| "The node credential file is invalid".to_owned())
+    let bytes =
+        fs::read(path).map_err(|_| "Could not read the node configuration file".to_owned())?;
+    serde_json::from_slice(&bytes).map_err(|_| "The node configuration file is invalid".to_owned())
 }
 
 pub(crate) fn save_config(config: &NodeConfig) -> Result<(), String> {
@@ -556,7 +657,7 @@ fn save_config_to(path: &Path, config: &NodeConfig, secure_parent: bool) -> Resu
     }
     let file_name = path
         .file_name()
-        .ok_or_else(|| "Could not determine the node credential file name".to_owned())?;
+        .ok_or_else(|| "Could not determine the node configuration file name".to_owned())?;
     let temporary = parent.join(format!(
         ".{}.tmp-{}",
         file_name.to_string_lossy(),
@@ -578,7 +679,7 @@ fn save_config_to(path: &Path, config: &NodeConfig, secure_parent: bool) -> Resu
     })();
     if write_result.is_err() {
         let _ = fs::remove_file(&temporary);
-        return Err("Could not securely save the node credential file".to_owned());
+        return Err("Could not securely save the node configuration file".to_owned());
     }
     Ok(())
 }
@@ -648,16 +749,18 @@ mod tests {
             sync_roots: Vec::new(),
         };
         save_config_to(&path, &config, true).unwrap();
-        assert_eq!(
-            load_config_from(&path).unwrap().refresh_token.as_deref(),
-            Some("initial-token")
-        );
+        let saved = fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("private-secret"));
+        assert!(!saved.contains("initial-token"));
+        let reloaded = load_config_from(&path).unwrap();
+        assert!(reloaded.peer_private_key.is_empty());
+        assert_eq!(reloaded.refresh_token, None);
         config.refresh_token = Some("rotated-token".to_owned());
         save_config_to(&path, &config, true).unwrap();
-        assert_eq!(
-            load_config_from(&path).unwrap().refresh_token.as_deref(),
-            Some("rotated-token")
-        );
+        let saved = fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("private-secret"));
+        assert!(!saved.contains("rotated-token"));
+        assert_eq!(load_config_from(&path).unwrap().refresh_token, None);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -672,5 +775,27 @@ mod tests {
         }
         fs::remove_file(&path).unwrap();
         fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn legacy_config_secrets_remain_deserializable_for_secure_migration() {
+        let value = serde_json::json!({
+            "apiUrl": "https://api.example.test",
+            "installationId": "00000000-0000-4000-8000-000000000001",
+            "name": "Test NAS",
+            "peerId": "test-peer",
+            "peerPublicKey": "public",
+            "peerPrivateKey": "legacy-private-key",
+            "refreshToken": "legacy-refresh-token"
+        });
+        let config: NodeConfig = serde_json::from_value(value).unwrap();
+        assert_eq!(config.peer_private_key, "legacy-private-key");
+        assert_eq!(
+            config.refresh_token.as_deref(),
+            Some("legacy-refresh-token")
+        );
+        let saved = serde_json::to_string(&config).unwrap();
+        assert!(!saved.contains("legacy-private-key"));
+        assert!(!saved.contains("legacy-refresh-token"));
     }
 }

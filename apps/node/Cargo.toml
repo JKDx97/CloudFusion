@@ -8,6 +8,7 @@ rust-version = "1.88"
 [dependencies]
 base64 = "0.22"
 futures = "0.3"
+keyring = "4.2.0"
 libp2p = { version = "0.57.0", default-features = false, features = ["cbor", "dcutr", "ed25519", "identify", "macros", "mdns", "noise", "quic", "relay", "request-response", "tokio", "yamux"] }
 reqwest = { version = "0.13.5", features = ["json", "stream"] }
 serde = { version = "1", features = ["derive"] }
