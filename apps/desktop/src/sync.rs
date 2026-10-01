@@ -891,6 +891,12 @@ fn sync_file_matches(
 }
 
 fn storage_bytes_for_manifest(roots: &[SyncRoot], manifest: &SyncManifest) -> Result<u64, String> {
+    if !roots.iter().any(|root| root.remote_node_id.is_some()) {
+        return Err(
+            "Storage contribution requires at least one configured CloudFusion sync folder"
+                .to_owned(),
+        );
+    }
     let mut total = 0u64;
     for root in roots.iter().filter(|root| root.remote_node_id.is_some()) {
         let root_metadata = fs::symlink_metadata(&root.path)
@@ -1804,6 +1810,24 @@ mod tests {
 
         assert_eq!(used, 3);
         fs::remove_dir_all(&root_path).expect("test root cleans up");
+    }
+
+    #[test]
+    fn storage_usage_requires_a_remote_cloudfusion_sync_root() {
+        let root_path =
+            std::env::temp_dir().join(format!("cloudfusion-local-root-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root_path).expect("test root creates");
+        let root = SyncRoot {
+            id: Uuid::new_v4().to_string(),
+            path: root_path.to_string_lossy().into_owned(),
+            remote_node_id: None,
+        };
+
+        let error = storage_bytes_for_manifest(&[root], &SyncManifest::default())
+            .expect_err("a local-only folder cannot contribute CloudFusion storage");
+
+        assert!(error.contains("configured CloudFusion sync folder"));
+        fs::remove_dir_all(root_path).expect("test root cleans up");
     }
 
     #[test]

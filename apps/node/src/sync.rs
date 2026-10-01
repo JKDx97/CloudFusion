@@ -1562,6 +1562,12 @@ fn storage_bytes_for_manifest(
     roots: &[NodeSyncRoot],
     manifest: &SyncManifest,
 ) -> Result<u64, String> {
+    if roots.is_empty() {
+        return Err(
+            "Storage contribution requires at least one configured CloudFusion sync folder"
+                .to_owned(),
+        );
+    }
     let mut total = 0u64;
     for root in roots {
         validate_root(root)?;
@@ -1750,5 +1756,13 @@ mod tests {
 
         assert_eq!(used, 7);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn storage_usage_requires_a_configured_cloudfusion_sync_root() {
+        let error = storage_bytes_for_manifest(&[], &SyncManifest::default())
+            .expect_err("storage contribution cannot run without a managed sync root");
+
+        assert!(error.contains("configured CloudFusion sync folder"));
     }
 }
