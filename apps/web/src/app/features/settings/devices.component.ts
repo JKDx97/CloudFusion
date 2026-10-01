@@ -22,6 +22,17 @@ interface RegisteredDevice {
   revokedAt: string | null;
 }
 
+interface DeviceStorageConfiguration {
+  deviceId: string;
+  enabled: boolean;
+  maxBytes: string | null;
+  usedBytes: string;
+  availableBytes: string;
+  storageClass: 'DEVICE_VOLATILE' | 'DEVICE_ALWAYS_ON' | null;
+  availabilityStatus: 'ONLINE' | 'OFFLINE' | 'DISABLED';
+  lastSeenAt: string | null;
+}
+
 interface DevicePairingCode {
   code: string;
   expiresAt: string;
@@ -47,12 +58,16 @@ export class DevicesComponent implements OnInit, OnDestroy {
   private pairingExpiryTimer?: number;
 
   readonly devices = signal<RegisteredDevice[]>([]);
+  readonly deviceStorage = signal<Record<string, DeviceStorageConfiguration>>({});
+  readonly storageCapacityGiB = signal<Record<string, string>>({});
+  readonly storageClass = signal<Record<string, 'DEVICE_VOLATILE' | 'DEVICE_ALWAYS_ON'>>({});
   readonly currentDeviceId = this.auth.deviceId;
   readonly pairingCode = signal<DevicePairingCode | null>(null);
   readonly loading = signal(true);
   readonly creatingCode = signal(false);
   readonly revokingDevice = signal<string | null>(null);
   readonly savingDeviceSettings = signal<string | null>(null);
+  readonly savingStorageSettings = signal<string | null>(null);
   readonly error = signal('');
   readonly notice = signal('');
   readonly p2pSettings: P2pSetting[] = [
@@ -79,6 +94,28 @@ export class DevicesComponent implements OnInit, OnDestroy {
         this.http.get<ApiResponse<RegisteredDevice[]>>(`${this.apiUrl}/devices`),
       );
       this.devices.set(response.data);
+      const activeDevices = response.data.filter((device) => !device.revokedAt);
+      const storageResults = await Promise.all(activeDevices.map(async (device) => {
+        try {
+          const result = await firstValueFrom(this.http.get<ApiResponse<DeviceStorageConfiguration>>(
+            `${this.apiUrl}/devices/${device.id}/storage`,
+          ));
+          return result.data;
+        } catch {
+          return null;
+        }
+      }));
+      const storage = Object.fromEntries(storageResults.filter((item): item is DeviceStorageConfiguration => item !== null)
+        .map((item) => [item.deviceId, item]));
+      this.deviceStorage.set(storage);
+      this.storageCapacityGiB.set(Object.fromEntries(Object.values(storage).map((item) => [
+        item.deviceId,
+        item.maxBytes ? (Number(item.maxBytes) / 1_073_741_824).toFixed(3) : '',
+      ])));
+      this.storageClass.set(Object.fromEntries(Object.values(storage).map((item) => [
+        item.deviceId,
+        item.storageClass ?? 'DEVICE_VOLATILE',
+      ])));
     } catch {
       this.error.set('No se pudieron cargar tus dispositivos. Inténtalo de nuevo.');
     } finally {
@@ -161,6 +198,79 @@ export class DevicesComponent implements OnInit, OnDestroy {
       this.error.set(`No se pudo actualizar la configuración de ${device.name}. Inténtalo de nuevo.`);
     } finally {
       this.savingDeviceSettings.set(null);
+    }
+  }
+
+  setStorageCapacity(deviceId: string, value: string): void {
+    this.storageCapacityGiB.update((current) => ({ ...current, [deviceId]: value }));
+  }
+
+  setStorageClass(deviceId: string, value: string): void {
+    if (value !== 'DEVICE_VOLATILE' && value !== 'DEVICE_ALWAYS_ON') return;
+    this.storageClass.update((current) => ({ ...current, [deviceId]: value }));
+  }
+
+  async saveStorageSettings(device: RegisteredDevice, enabled: boolean): Promise<void> {
+    if (device.revokedAt || this.savingStorageSettings()) return;
+    const input = this.storageCapacityGiB()[device.id] ?? '';
+    const parsedMaxBytes = input.trim() ? this.gibiBytes(input) : null;
+    if (enabled && !parsedMaxBytes) {
+      this.error.set('Indica una capacidad válida en GiB (por ejemplo, 20 o 20.5).');
+      return;
+    }
+    const maxBytes = parsedMaxBytes ?? (enabled ? null : this.deviceStorage()[device.id]?.maxBytes ?? null);
+
+    this.savingStorageSettings.set(device.id);
+    this.error.set('');
+    this.notice.set('');
+    try {
+      const response = await firstValueFrom(this.http.patch<ApiResponse<DeviceStorageConfiguration>>(
+        `${this.apiUrl}/devices/${device.id}/storage`,
+        {
+          enabled,
+          ...(maxBytes ? { maxBytes } : {}),
+          storageClass: this.storageClass()[device.id] ?? 'DEVICE_VOLATILE',
+        },
+      ));
+      this.deviceStorage.update((current) => ({ ...current, [device.id]: response.data }));
+      this.notice.set(enabled
+        ? `Almacenamiento configurado para ${device.name}. Se mostrará disponible cuando el dispositivo envíe su heartbeat.`
+        : `Aporte de almacenamiento desactivado para ${device.name}.`);
+      await this.loadDevices();
+    } catch {
+      this.error.set(`No se pudo guardar el almacenamiento de ${device.name}. Revisa la capacidad y vuelve a intentarlo.`);
+    } finally {
+      this.savingStorageSettings.set(null);
+    }
+  }
+
+  storageStatusLabel(deviceId: string): string {
+    const status = this.deviceStorage()[deviceId]?.availabilityStatus;
+    if (status === 'ONLINE') return 'En línea';
+    if (status === 'OFFLINE') return 'Sin heartbeat';
+    if (status === 'DISABLED') return 'Desactivado';
+    return 'No disponible';
+  }
+
+  formatBytes(value: string): string {
+    const bytes = Number(value);
+    if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
+    const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+    const unit = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+    return `${(bytes / 1024 ** unit).toFixed(unit === 0 ? 0 : 1)} ${units[unit]}`;
+  }
+
+  private gibiBytes(value: string): string | null {
+    const match = /^(\d+)(?:\.(\d{1,3}))?$/.exec(value.trim());
+    if (!match) return null;
+    try {
+      const whole = BigInt(match[1]);
+      const fraction = BigInt((match[2] ?? '').padEnd(3, '0') || '0');
+      const thousandths = whole * 1000n + fraction;
+      const bytes = (thousandths * 1_073_741_824n + 500n) / 1000n;
+      return bytes > 0n && bytes <= 9_223_372_036_854_775_807n ? bytes.toString() : null;
+    } catch {
+      return null;
     }
   }
 }

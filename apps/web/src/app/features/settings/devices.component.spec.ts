@@ -70,7 +70,17 @@ describe('DevicesComponent', () => {
       revokedAt: null,
     };
     http.expectOne('http://localhost:3000/devices').flush({ data: [device], message: 'ok' });
+    await Promise.resolve();
+    http.expectOne('http://localhost:3000/devices/nas-device/storage').flush({
+      data: {
+        deviceId: 'nas-device', enabled: false, maxBytes: null, usedBytes: '0', availableBytes: '0',
+        storageClass: null, availabilityStatus: 'DISABLED', lastSeenAt: null,
+      },
+      message: 'ok',
+    });
     await fixture.whenStable();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await Promise.resolve();
     fixture.detectChanges();
 
     const enableP2p = fixture.nativeElement.querySelector('[aria-label="Activar P2P en CloudFusion NAS"]') as HTMLButtonElement | null;
@@ -87,5 +97,98 @@ describe('DevicesComponent', () => {
 
     expect(fixture.nativeElement.querySelector('[aria-label="Desactivar P2P en CloudFusion NAS"]')).not.toBeNull();
     expect(fixture.nativeElement.textContent).toContain('P2P: activado');
+  });
+
+  it('converts GiB to exact bytes when enabling a device storage target', async () => {
+    fixture.detectChanges();
+    const device = {
+      id: 'nas-device',
+      name: 'CloudFusion NAS',
+      platform: 'NAS',
+      clientVersion: '0.1.0',
+      p2pEnabled: false,
+      lanDiscoveryEnabled: true,
+      internetP2pEnabled: false,
+      relayAllowed: true,
+      serveLocalFiles: false,
+      storageContributionEnabled: false,
+      lastSeenAt: null,
+      revokedAt: null,
+    };
+    http.expectOne('http://localhost:3000/devices').flush({ data: [device], message: 'ok' });
+    await Promise.resolve();
+    http.expectOne('http://localhost:3000/devices/nas-device/storage').flush({
+      data: {
+        deviceId: 'nas-device', enabled: false, maxBytes: null, usedBytes: '0', availableBytes: '0',
+        storageClass: null, availabilityStatus: 'DISABLED', lastSeenAt: null,
+      },
+      message: 'ok',
+    });
+    await fixture.whenStable();
+
+    fixture.componentInstance.setStorageCapacity('nas-device', '1.5');
+    const saving = fixture.componentInstance.saveStorageSettings(device, true);
+    const update = http.expectOne('http://localhost:3000/devices/nas-device/storage');
+    expect(update.request.method).toBe('PATCH');
+    expect(update.request.body).toEqual({
+      enabled: true,
+      maxBytes: '1610612736',
+      storageClass: 'DEVICE_VOLATILE',
+    });
+    update.flush({
+      data: {
+        deviceId: 'nas-device', enabled: true, maxBytes: '1610612736', usedBytes: '0',
+        availableBytes: '1610612736', storageClass: 'DEVICE_VOLATILE',
+        availabilityStatus: 'OFFLINE', lastSeenAt: null,
+      },
+      message: 'ok',
+    });
+    await Promise.resolve();
+    http.expectOne('http://localhost:3000/devices').flush({
+      data: [{ ...device, storageContributionEnabled: true }],
+      message: 'ok',
+    });
+    await Promise.resolve();
+    http.expectOne('http://localhost:3000/devices/nas-device/storage').flush({
+      data: {
+        deviceId: 'nas-device', enabled: true, maxBytes: '1610612736', usedBytes: '0',
+        availableBytes: '1610612736', storageClass: 'DEVICE_VOLATILE',
+        availabilityStatus: 'OFFLINE', lastSeenAt: null,
+      },
+      message: 'ok',
+    });
+    await saving;
+
+    fixture.componentInstance.setStorageCapacity('nas-device', '');
+    const disabling = fixture.componentInstance.saveStorageSettings(device, false);
+    const disableRequest = http.expectOne('http://localhost:3000/devices/nas-device/storage');
+    expect(disableRequest.request.body).toEqual({
+      enabled: false,
+      maxBytes: '1610612736',
+      storageClass: 'DEVICE_VOLATILE',
+    });
+    disableRequest.flush({
+      data: {
+        deviceId: 'nas-device', enabled: false, maxBytes: '1610612736', usedBytes: '0',
+        availableBytes: '1610612736', storageClass: 'DEVICE_VOLATILE',
+        availabilityStatus: 'DISABLED', lastSeenAt: null,
+      },
+      message: 'ok',
+    });
+    await Promise.resolve();
+    http.expectOne('http://localhost:3000/devices').flush({
+      data: [{ ...device, storageContributionEnabled: false }],
+      message: 'ok',
+    });
+    await Promise.resolve();
+    http.expectOne('http://localhost:3000/devices/nas-device/storage').flush({
+      data: {
+        deviceId: 'nas-device', enabled: false, maxBytes: '1610612736', usedBytes: '0',
+        availableBytes: '1610612736', storageClass: 'DEVICE_VOLATILE',
+        availabilityStatus: 'DISABLED', lastSeenAt: null,
+      },
+      message: 'ok',
+    });
+    await disabling;
   });
 });
