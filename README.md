@@ -8,7 +8,7 @@ CloudFusion es un gestor multicloud construido sobre Angular, NestJS, TypeScript
 - Backend: NestJS, REST, Swagger, TypeORM y PostgreSQL.
 - Seguridad: JWT access/refresh, Argon2, AES-256-GCM para tokens cloud, Helmet, CORS, validación y rate limiting.
 - Proveedores implementados: Google Drive y Microsoft OneDrive.
-- Redis: BullMQ para la cola de transferencias y worker; también queda disponible para cache/estado distribuido futuro.
+- Redis: BullMQ para subidas en segundo plano, transferencias entre nubes, réplicas, copias de seguridad y restauraciones; admite Redis local o Redis Cloud con TLS.
 - CloudFusion Drive: índice virtual, políticas de replicación, réplicas físicas, checksum SHA-256, failover, reparación y papelera.
 
 ## Instalación
@@ -35,6 +35,10 @@ MICROSOFT_CLIENT_SECRET=
 MICROSOFT_REDIRECT_URI=http://localhost:3000/cloud-accounts/onedrive/callback
 MICROSOFT_TENANT_ID=common
 
+# Redis Cloud: copia la URL de conexión de tu base; deja vacía para Redis local.
+# Usa rediss:// si tu base ofrece TLS (recomendado) o redis:// según indique Redis Cloud.
+REDIS_URL=
+
 # 32 bytes en base64 o 64 caracteres hexadecimales
 CLOUD_TOKEN_ENCRYPTION_KEY=
 CLOUD_UPLOAD_MAX_BYTES=52428800
@@ -46,6 +50,8 @@ TRANSFER_WORKER_CONCURRENCY=3
 TRANSFER_MAX_RETRIES=3
 TRANSFER_PROGRESS_INTERVAL_MS=1000
 ```
+
+En Redis Cloud crea una base de datos, permite conexiones desde la IP pública de este equipo y copia la URL de conexión que te proporcione el panel (TLS con `rediss://` cuando esté disponible). Coloca la URL completa en `REDIS_URL` del `.env` local del backend; codifica caracteres especiales de la contraseña para URL y no la guardes en Git ni la compartas por chat. La cola transporta estados y rutas temporales de trabajos, no el contenido de los archivos: las copias siguen guardándose en Drive/OneDrive. Las descargas al navegador se transmiten desde el proveedor y las transferencias entre proveedores se procesan en los workers de BullMQ.
 
 Genera una clave de cifrado segura, por ejemplo:
 
@@ -118,9 +124,9 @@ La API queda en `http://localhost:3000`, Swagger en `http://localhost:3000/api/d
 | --- | --- | --- |
 | GET | `/cloud-accounts` | Cuentas conectadas del usuario |
 | GET | `/cloud-accounts/storage-summary` | Cuotas y total combinado |
-| GET | `/cloud-accounts/google/connect` | Iniciar OAuth Google |
+| POST | `/cloud-accounts/google/connect` | Iniciar OAuth Google (requiere JWT y devuelve la URL de autorización) |
 | GET | `/cloud-accounts/google/callback` | Callback Google |
-| GET | `/cloud-accounts/onedrive/connect` | Iniciar OAuth Microsoft |
+| POST | `/cloud-accounts/onedrive/connect` | Iniciar OAuth Microsoft (requiere JWT y devuelve la URL de autorización) |
 | GET | `/cloud-accounts/onedrive/callback` | Callback Microsoft |
 | POST | `/cloud-accounts/:id/refresh` | Renovar token/cuota |
 | DELETE | `/cloud-accounts/:id` | Desconectar cuenta |
@@ -440,8 +446,71 @@ La primera versión WebDAV opera sobre el sistema de archivos virtual (no accede
 
 `MOVE`, `COPY`, `LOCK`, `UNLOCK` y `Range` no están implementados. Se rechazan métodos no soportados y el servidor anuncia `Accept-Ranges: none`; no se simula compatibilidad. Crea un token con los permisos `webdav` y el permiso de archivos correspondiente. Los clientes con Bearer pueden usar `http://localhost:3000/dav` en desarrollo local; Basic Auth usa como usuario el ID de CloudFusion y como contraseña el token, únicamente por HTTPS. En producción exige HTTPS (también en el proxy inverso, configurando correctamente la detección de TLS). `WEBDAV_ENABLED=false` deshabilita el endpoint.
 
-La API S3 y el cliente Desktop todavía no están disponibles; sus permisos ya pueden seleccionarse para preparar futuras integraciones.
+Nota histórica de esta entrega inicial de Fase 6: el cliente Desktop y la API S3 aún no estaban disponibles. Las capacidades Desktop/P2P y de almacenamiento de objetos añadidas posteriormente se describen en las Fases 9 y 8, respectivamente.
+
+## Fase 7 — Sharing & Collaboration (parcial)
+
+La Fase 7 incorpora colaboración sobre CloudFusion Drive, sin compartir credenciales de Google Drive ni OneDrive:
+
+- Compartición privada de archivos y carpetas, invitaciones y roles `VIEWER`, `EDITOR` y `MANAGER`, con comprobaciones de propiedad y permisos efectivos.
+- Enlaces públicos con token revocable y controles de acceso, como expiración, contraseña y límite de descargas.
+- Workspaces con miembros, invitaciones y roles propios; el acceso a sus elementos se valida en el backend.
+- Las rutas privadas y públicas están separadas; conocer un identificador no concede acceso.
+
+```mermaid
+flowchart LR
+  D[CloudFusion Drive] --> P[Permission Engine]
+  P --> S[Private shares]
+  P --> W[Workspace Drive]
+  D --> L[Public links]
+```
+
+**Estado:** parcial. Compartición privada/pública y workspaces tienen API y partes de interfaz. Comentarios, menciones, centro de notificaciones, feed de actividad/presencia y sincronización selectiva de workspaces requieren completar su implementación y pruebas antes de considerar la fase terminada.
+
+## Fase 8 — Universal Cloud Provider Layer (parcial)
+
+La Fase 8 organiza los conectores por tipo de almacenamiento y capacidades, para que las operaciones no dependan de una implementación específica del proveedor.
+
+| Categoría | Proveedores | Estado actual |
+| --- | --- | --- |
+| Consumer cloud | Google Drive, OneDrive, Dropbox, Box y pCloud | Conectores OAuth; disponibilidad y capacidades varían por proveedor. |
+| Object storage / S3-compatible | Amazon S3, Cloudflare R2, Wasabi, Backblaze B2, DigitalOcean Spaces, Oracle Object Storage, IBM COS y endpoints S3 personalizados | Catálogo y adaptadores en estado beta; las capacidades no son idénticas entre servicios. |
+| Próximamente / experimental | MEGA, Azure Blob Storage, Google Cloud Storage y MediaFire | Aún no se deben presentar como conectores funcionales. |
+
+El catálogo central expone autenticación, categoría, estado y capacidades (por ejemplo, listado, carpetas, cuota o cargas multipartes). Las credenciales de proveedor se almacenan cifradas en el backend; los formularios de almacenamiento de objetos permiten configurar y probar targets sin publicar secretos en el frontend.
+
+```mermaid
+flowchart LR
+  A[Angular / CloudFusion Drive] --> R[Provider registry]
+  R --> C[Consumer cloud adapters]
+  R --> O[Object storage adapters]
+  R --> X[S3-compatible targets]
+```
+
+**Estado:** parcial/beta. Los conectores y capacidades deben validarse con credenciales reales de cada proveedor; un elemento del catálogo marcado como próximo o experimental no implica que admita operaciones de archivos.
+
+## Fase 9 — Device Mesh & P2P (en desarrollo)
+
+La Fase 9 permite que dispositivos autorizados compartan datos directamente cuando sea posible, manteniendo a CloudFusion como plano de control para identidad, permisos, versiones y autorización.
+
+```mermaid
+flowchart LR
+  A[Desktop / NAS A] <--> N[LAN, TCP o QUIC]
+  A <--> R[Relay autorizado]
+  R <--> B[Desktop / NAS B]
+  A --> C[CloudFusion API: permisos y ticket de un solo uso]
+  B --> C
+  A -. fallback .-> P[Proveedor cloud]
+  P -. fallback .-> B
+```
+
+- El API anuncia disponibilidad por dispositivo/versión y emite tickets de transferencia de corta duración y uso único; al reclamarlos vuelve a comprobar dispositivo, revocación y permisos.
+- Desktop y el nodo headless/NAS pueden sincronizar cambios locales hacia una carpeta de CloudFusion Drive, servir versiones locales verificadas y preferir pares autorizados para descargas.
+- Los clientes admiten rutas directas TCP/QUIC y relay; si P2P no está disponible, se conserva la descarga cloud autorizada.
+- Los bloques se reciben en un archivo temporal y no se instalan como versión final hasta verificar tamaño y SHA-256. El almacenamiento dedicado por dispositivo mantiene una réplica de archivo completo.
+
+**Límites actuales:** la sincronización no es bidireccional entre dispositivos; las eliminaciones locales no se propagan. La fase sigue en desarrollo: falta completar la validación de extremo a extremo en Windows y endurecer las pruebas de descubrimiento LAN/NAT y operación del relay. El empaquetado/despliegue Linux/NAS se documentará y verificará aparte.
 
 ## Fuera del alcance actual
 
-CloudFusion todavía no implementa Dropbox, Box, MEGA, pCloud, P2P, BitTorrent, erasure coding/RAID, cifrado end-to-end de conocimiento cero, montaje local, WebDAV completo (MOVE/COPY/LOCK/UNLOCK/Range), gateway S3, CDN, Kubernetes ni aplicación móvil.
+Los conectores de proveedor en beta pueden tener operaciones limitadas. MEGA, Azure Blob, Google Cloud Storage y MediaFire siguen pendientes/experimentales; también siguen fuera de alcance BitTorrent, erasure coding/RAID, cifrado end-to-end de conocimiento cero, montaje de disco local, WebDAV completo (`MOVE`/`COPY`/`LOCK`/`UNLOCK`/`Range`), gateway S3 completo, CDN, Kubernetes y aplicación móvil. La sincronización P2P entre dispositivos es parcial y no replica eliminaciones.
