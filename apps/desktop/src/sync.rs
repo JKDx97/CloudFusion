@@ -274,6 +274,20 @@ impl SyncState {
         fs::write(&self.roots_file, data).map_err(|error| error.to_string())
     }
 
+    pub(crate) fn ensure_separate_storage_path(&self, path: &Path) -> Result<(), String> {
+        let roots = self
+            .roots
+            .lock()
+            .map_err(|_| "Sync root state is unavailable".to_owned())?;
+        if roots
+            .iter()
+            .any(|root| crate::storage::paths_overlap(path, Path::new(&root.path)))
+        {
+            return Err("La carpeta de almacenamiento debe estar separada de todas las carpetas sincronizadas".to_owned());
+        }
+        Ok(())
+    }
+
     fn save_manifest(&self, manifest: &SyncManifest) -> Result<(), String> {
         let data = serde_json::to_vec_pretty(manifest).map_err(|error| error.to_string())?;
         fs::write(&self.manifest_file, data).map_err(|error| error.to_string())
@@ -1449,11 +1463,16 @@ pub async fn choose_sync_folder() -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
-pub fn add_sync_root(path: String, state: State<'_, SyncState>) -> Result<SyncRoot, String> {
+pub fn add_sync_root(
+    path: String,
+    state: State<'_, SyncState>,
+    storage_state: State<'_, crate::storage::DeviceStorageState>,
+) -> Result<SyncRoot, String> {
     let canonical_path = fs::canonicalize(&path).map_err(|error| error.to_string())?;
     if !canonical_path.is_dir() {
         return Err("Select an existing folder to synchronize".to_owned());
     }
+    storage_state.ensure_separate_sync_path(&canonical_path)?;
     let root = SyncRoot {
         id: Uuid::new_v4().to_string(),
         path: canonical_path.to_string_lossy().into_owned(),

@@ -1,5 +1,6 @@
 mod device;
 mod mesh;
+mod storage;
 mod sync;
 mod transfer;
 
@@ -18,10 +19,13 @@ fn main() {
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
             let sync_state = SyncState::load(app.handle().clone(), &data_dir)
                 .map_err(|error| std::io::Error::other(error.to_string()))?;
+            let device_storage_state = storage::DeviceStorageState::load(&data_dir)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
 
             app.manage(identity);
             let local_file_index = sync_state.shared_local_file_index();
             app.manage(sync_state);
+            app.manage(device_storage_state);
             app.manage(MeshManager::new(local_file_index));
             Ok(())
         })
@@ -36,6 +40,10 @@ fn main() {
             mesh::stop_lan_mesh,
             sync::get_sync_roots,
             sync::get_sync_storage_usage,
+            storage::get_device_storage_root,
+            storage::choose_device_storage_folder,
+            storage::set_device_storage_root,
+            storage::get_device_storage_usage,
             sync::set_sync_destination,
             sync::choose_sync_folder,
             sync::add_sync_root,

@@ -15,6 +15,10 @@ interface DesktopDeviceRegistration {
   clientVersion: string;
 }
 
+interface DeviceStorageRoot {
+  path: string;
+}
+
 interface RemoteFolder {
   id: string;
   name: string;
@@ -71,6 +75,7 @@ export class DesktopSyncComponent implements OnInit, OnDestroy {
   private readonly apiUrl = environment.apiUrl;
   readonly desktopAvailable = this.bridgeAvailable();
   readonly device = signal<DesktopDeviceRegistration | null>(null);
+  readonly deviceStorageRoot = signal<DeviceStorageRoot | null>(null);
   readonly roots = this.syncCoordinator.roots;
   readonly changes = this.syncCoordinator.changes;
   readonly remoteFolders = signal<Array<{ id: string; label: string }>>([]);
@@ -118,6 +123,7 @@ export class DesktopSyncComponent implements OnInit, OnDestroy {
       const device = await this.invoke<DesktopDeviceRegistration>('get_device_registration');
       await this.syncCoordinator.refresh();
       this.device.set(device);
+      this.deviceStorageRoot.set(await this.invoke<DeviceStorageRoot | null>('get_device_storage_root'));
       this.error.set(null);
       await this.loadMeshConfiguration();
       try {
@@ -141,6 +147,21 @@ export class DesktopSyncComponent implements OnInit, OnDestroy {
       }
     } catch (error) {
       this.error.set(typeof error === 'string' ? error : 'No se pudo agregar la carpeta.');
+    } finally {
+      this.busy.set(false);
+    }
+  }
+
+  async chooseDeviceStorageFolder(): Promise<void> {
+    this.busy.set(true);
+    this.error.set(null);
+    try {
+      const path = await this.invoke<string | null>('choose_device_storage_folder');
+      if (!path) return;
+      this.deviceStorageRoot.set(await this.invoke<DeviceStorageRoot>('set_device_storage_root', { path }));
+      this.syncNotice.set('Carpeta dedicada configurada. CloudFusion la usará solo para réplicas locales; la ruta no se envía al servidor.');
+    } catch (error) {
+      this.error.set(this.nativeError(error, 'No se pudo configurar la carpeta dedicada de almacenamiento.'));
     } finally {
       this.busy.set(false);
     }

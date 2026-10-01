@@ -35,6 +35,23 @@
         </div>
       </section>
 
+      <section class="rounded-2xl border border-emerald-200 bg-white p-5 shadow-sm">
+        <div class="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
+          <div>
+            <h2 class="font-semibold">Almacenamiento dedicado de este dispositivo</h2>
+            <p class="mt-1 max-w-3xl text-sm leading-6 text-slate-600">Selecciona una carpeta exclusiva para réplicas completas. Se mantiene separada de tus carpetas sincronizadas y CloudFusion no envía esta ruta al servidor.</p>
+            @if (deviceStorageRoot(); as storageRoot) {
+              <code class="mt-2 block break-all text-xs text-slate-600">{{ storageRoot.path }}</code>
+            } @else {
+              <p class="mt-2 text-xs text-amber-700">Aún no hay una carpeta dedicada configurada; el aporte de almacenamiento no podrá marcar este dispositivo disponible.</p>
+            }
+          </div>
+          <button type="button" (click)="chooseDeviceStorageFolder()" [disabled]="busy()" class="shrink-0 rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-2.5 text-sm font-semibold text-emerald-800 hover:bg-emerald-100 disabled:opacity-60">
+            {{ busy() ? 'Abriendo…' : (deviceStorageRoot() ? 'Cambiar carpeta dedicada' : 'Elegir carpeta dedicada') }}
+          </button>
+        </div>
+      </section>
+
       <section class="rounded-2xl border border-indigo-200 bg-white p-5 shadow-sm">
         <div>
           <h2 class="font-semibold">Conexión entre tus dispositivos</h2>

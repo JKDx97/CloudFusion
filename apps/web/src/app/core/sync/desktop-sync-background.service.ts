@@ -279,7 +279,7 @@ export class DesktopSyncBackgroundService {
         `${this.apiUrl}/devices/${deviceId}/storage`,
       ));
       if (!configuration.data.enabled || !configuration.data.maxBytes) return;
-      const usedBytes = await this.invoke<string>('get_sync_storage_usage');
+      const usedBytes = await this.invoke<string>('get_device_storage_usage');
       if (BigInt(usedBytes) > BigInt(configuration.data.maxBytes)) return;
       await firstValueFrom(this.http.post<ApiResponse<DeviceStorageConfiguration>>(
         `${this.apiUrl}/devices/${deviceId}/storage/heartbeat`,
