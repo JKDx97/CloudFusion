@@ -23,6 +23,8 @@ import { PermissionsService } from '../permissions/permissions.service';
 import { AdvertiseAvailabilityDto } from './dto/advertise-availability.dto';
 import { AuthorizePeerTransferDto } from './dto/authorize-peer-transfer.dto';
 import { DeviceFileAvailability, DeviceFileAvailabilityStatus } from './entities/device-file-availability.entity';
+import { DeviceStorageReplica, DeviceStorageReplicaStatus } from './entities/device-storage-replica.entity';
+import { StorageTarget } from '../providers/object-storage/entities/storage-target.entity';
 import { PeerTransferSession } from './entities/peer-transfer-session.entity';
 import { PeerTransferStatus, PeerTransferTransport } from './enums/peer-transfer-status.enum';
 
@@ -35,6 +37,7 @@ const ACTIVE_TRANSFER_STATUSES = [
   PeerTransferStatus.VERIFYING,
 ];
 const AVAILABILITY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const DEVICE_STORAGE_HEARTBEAT_TTL_MS = 3 * 60 * 1000;
 
 interface PeerTransferTicketClaims {
   sub: string;
@@ -60,6 +63,8 @@ export class P2pService {
     @InjectRepository(VirtualNode) private readonly nodes: Repository<VirtualNode>,
     @InjectRepository(FileVersion) private readonly versions: Repository<FileVersion>,
     @InjectRepository(DeviceFileAvailability) private readonly availability: Repository<DeviceFileAvailability>,
+    @InjectRepository(DeviceStorageReplica) private readonly deviceStorageReplicas: Repository<DeviceStorageReplica>,
+    @InjectRepository(StorageTarget) private readonly storageTargets: Repository<StorageTarget>,
     @InjectRepository(PeerTransferSession) private readonly transfers: Repository<PeerTransferSession>,
     @InjectDataSource() private readonly dataSource: DataSource,
     private readonly deviceSessions: DevicesService,
@@ -184,6 +189,10 @@ export class P2pService {
     for (const row of rows) {
       const device = await this.devices.findOne({ where: { id: row.deviceId, revokedAt: IsNull() } });
       if (!device || row.userId !== device.userId || !device.peerId || !device.p2pEnabled || !device.serveLocalFiles) continue;
+      if (await this.hasStaleStorageHeartbeat(device)) {
+        await this.markDeviceOffline(device.id);
+        continue;
+      }
       if (!(await this.permissions.canDownload(device.userId, node.id))) continue;
       peers.push({
         deviceId: device.id,
@@ -210,7 +219,7 @@ export class P2pService {
     if (!(await this.permissions.canDownload(source.userId, node.id))) {
       throw new NotFoundException('Source device is not authorized for this file');
     }
-    await this.requireFreshAvailability(source.id, node.id, version);
+    await this.requireFreshAvailability(source, node.id, version);
 
     const ttlSeconds = this.ticketTtlSeconds();
     const now = new Date();
@@ -341,7 +350,7 @@ export class P2pService {
     if (!(await this.permissions.canDownload(source.userId, node.id))) {
       throw new ForbiddenException('Source permission has been revoked');
     }
-    await this.requireFreshAvailability(source.id, node.id, version);
+    await this.requireFreshAvailability(source, node.id, version);
 
     const now = new Date();
     const updated = await this.transfers.createQueryBuilder()
@@ -454,10 +463,14 @@ export class P2pService {
     return { node, version };
   }
 
-  private async requireFreshAvailability(deviceId: string, nodeId: string, version: FileVersion) {
+  private async requireFreshAvailability(device: UserDevice, nodeId: string, version: FileVersion) {
+    if (await this.hasStaleStorageHeartbeat(device)) {
+      await this.markDeviceOffline(device.id);
+      throw new NotFoundException('This device is offline and is not advertising the requested file version');
+    }
     const record = await this.availability.findOne({
       where: {
-        deviceId,
+        deviceId: device.id,
         nodeId,
         versionId: version.id,
         contentHash: version.checksum,
@@ -468,6 +481,25 @@ export class P2pService {
     });
     if (!record) throw new NotFoundException('This device is not advertising the requested file version');
     return record;
+  }
+
+  private async hasStaleStorageHeartbeat(device: UserDevice): Promise<boolean> {
+    if (!device.storageContributionEnabled) return false;
+    const target = await this.storageTargets.findOne({ where: { deviceId: device.id, enabled: true } });
+    return !target?.lastSeenAt || Date.now() - target.lastSeenAt.getTime() > DEVICE_STORAGE_HEARTBEAT_TTL_MS;
+  }
+
+  private async markDeviceOffline(deviceId: string): Promise<void> {
+    await Promise.all([
+      this.availability.update(
+        { deviceId, status: DeviceFileAvailabilityStatus.AVAILABLE },
+        { status: DeviceFileAvailabilityStatus.OFFLINE },
+      ),
+      this.deviceStorageReplicas.update(
+        { deviceId, status: DeviceStorageReplicaStatus.AVAILABLE },
+        { status: DeviceStorageReplicaStatus.OFFLINE },
+      ),
+    ]);
   }
 
   private async requireCurrentDevice(userId: string, deviceId?: string) {

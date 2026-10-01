@@ -57,6 +57,11 @@ function makeService() {
     update: jest.fn().mockResolvedValue({ affected: 1 }),
     delete: jest.fn().mockResolvedValue({ affected: 1 }),
   };
+  const deviceStorageReplicas = { update: jest.fn().mockResolvedValue({ affected: 1 }) };
+  const storageTargets = {
+    findOne: jest.fn().mockResolvedValue({ lastSeenAt: new Date(), enabled: true }),
+    update: jest.fn().mockResolvedValue({ affected: 1 }),
+  };
   const queryBuilder = {
     update: jest.fn().mockReturnThis(),
     set: jest.fn().mockReturnThis(),
@@ -101,6 +106,8 @@ function makeService() {
     nodes as never,
     versions as never,
     availability as never,
+    deviceStorageReplicas as never,
+    storageTargets as never,
     transfers as never,
     dataSource as never,
     deviceSessions as never,
@@ -109,7 +116,7 @@ function makeService() {
     config as never,
     audit as never,
   );
-  return { service, devices, nodes, versions, availability, transfers, dataSource, manager, deviceSessions, permissions, jwt, config, audit, queryBuilder, ticketClaims };
+  return { service, devices, nodes, versions, availability, deviceStorageReplicas, storageTargets, transfers, dataSource, manager, deviceSessions, permissions, jwt, config, audit, queryBuilder, ticketClaims };
 }
 
 describe('P2pService transfer coordination', () => {
@@ -208,6 +215,52 @@ describe('P2pService transfer coordination', () => {
     expect(ctx.availability.find).toHaveBeenCalledWith(expect.objectContaining({
       where: expect.objectContaining({ status: 'AVAILABLE' }),
     }));
+  });
+
+  it('does not advertise a storage-contributing peer after its storage heartbeat expires', async () => {
+    const ctx = makeService();
+    ctx.devices.findOne.mockResolvedValue({ ...sourceDevice, storageContributionEnabled: true } as never);
+    ctx.storageTargets.findOne.mockResolvedValue({
+      enabled: true,
+      lastSeenAt: new Date(Date.now() - 4 * 60_000),
+    });
+    ctx.availability.find.mockResolvedValue([{
+      deviceId: 'source-device',
+      userId: 'source-user',
+      lastVerifiedAt: new Date(),
+      expiresAt: new Date(Date.now() + 60_000),
+      sizeBytes: '17',
+    }]);
+
+    const result = await ctx.service.listAvailability('source-user', 'node-id', 'version-id');
+
+    expect(result).toEqual([]);
+    expect(ctx.availability.update).toHaveBeenCalledWith(
+      { deviceId: 'source-device', status: 'AVAILABLE' },
+      { status: 'OFFLINE' },
+    );
+    expect(ctx.deviceStorageReplicas.update).toHaveBeenCalledWith(
+      { deviceId: 'source-device', status: 'AVAILABLE' },
+      { status: 'OFFLINE' },
+    );
+  });
+
+  it('refuses a transfer from a storage-contributing device with a stale storage heartbeat', async () => {
+    const ctx = makeService();
+    ctx.devices.findOne.mockResolvedValue({ ...sourceDevice, storageContributionEnabled: true } as never);
+    ctx.storageTargets.findOne.mockResolvedValue({
+      enabled: true,
+      lastSeenAt: new Date(Date.now() - 4 * 60_000),
+    });
+
+    await expect(ctx.service.authorizeTransfer('destination-user', 'destination-device', {
+      sourceDeviceId: 'source-device', nodeId: 'node-id', versionId: 'version-id',
+    })).rejects.toBeInstanceOf(NotFoundException);
+    expect(ctx.jwt.signAsync).not.toHaveBeenCalled();
+    expect(ctx.deviceStorageReplicas.update).toHaveBeenCalledWith(
+      { deviceId: 'source-device', status: 'AVAILABLE' },
+      { status: 'OFFLINE' },
+    );
   });
 
   it('issues a short-lived ticket for a cross-user peer only when both users can read the exact version', async () => {

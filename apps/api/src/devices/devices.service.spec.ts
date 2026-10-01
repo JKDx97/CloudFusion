@@ -6,6 +6,8 @@ import { DevicePairingCode } from './entities/device-pairing-code.entity';
 import { StorageTarget } from '../providers/object-storage/entities/storage-target.entity';
 import { DeviceStorageClass } from '../providers/object-storage/enums/device-storage-class.enum';
 import { DeviceStorageStatus } from '../providers/object-storage/enums/device-storage-status.enum';
+import { DeviceStorageReplicaStatus } from '../p2p/entities/device-storage-replica.entity';
+import { DeviceFileAvailabilityStatus } from '../p2p/entities/device-file-availability.entity';
 
 function device(overrides: Partial<UserDevice> = {}): UserDevice {
   return {
@@ -61,6 +63,8 @@ describe('DevicesService', () => {
     save: jest.Mock;
     update: jest.Mock;
   };
+  let deviceStorageReplicas: { update: jest.Mock };
+  let deviceAvailability: { update: jest.Mock };
   let dataSource: { transaction: jest.Mock };
 
   beforeEach(() => {
@@ -100,13 +104,15 @@ describe('DevicesService', () => {
       save: jest.fn(async (value: StorageTarget) => value),
       update: jest.fn().mockResolvedValue({ affected: 1 }),
     };
+    deviceStorageReplicas = { update: jest.fn().mockResolvedValue({ affected: 1 }) };
+    deviceAvailability = { update: jest.fn().mockResolvedValue({ affected: 1 }) };
     const manager = {
       getRepository: jest.fn((entity: typeof UserDevice | typeof StorageTarget) => (entity === UserDevice ? repository : storageTargets)),
     };
     dataSource = {
       transaction: jest.fn(async (work: (manager: typeof manager) => unknown) => work(manager)),
     };
-    service = new DevicesService(repository as never, pairingCodes as never, audit as never, storageTargets as never, dataSource as never);
+    service = new DevicesService(repository as never, pairingCodes as never, audit as never, storageTargets as never, deviceStorageReplicas as never, deviceAvailability as never, dataSource as never);
   });
 
   it('creates a five-minute pairing code and persists only its hash', async () => {
@@ -374,6 +380,15 @@ describe('DevicesService', () => {
       availabilityStatus: DeviceStorageStatus.ONLINE,
     });
     expect(storageTargets.save).toHaveBeenCalledWith(expect.objectContaining({ usedBytes: '417', availableBytes: '583' }));
+    expect(deviceStorageReplicas.update).toHaveBeenCalledWith(
+      { deviceId: 'device-id', status: DeviceStorageReplicaStatus.OFFLINE },
+      {
+        status: DeviceStorageReplicaStatus.PENDING,
+        leaseExpiresAt: null,
+        lastError: expect.any(String),
+      },
+    );
+    expect(deviceAvailability.update).not.toHaveBeenCalled();
   });
 
   it('rejects device-reported usage above its configured allocation', async () => {
@@ -399,7 +414,7 @@ describe('DevicesService', () => {
   });
 
   it('reports a stale contributing device as offline without marking it missing', async () => {
-    repository.findOne.mockResolvedValue(device());
+    repository.findOne.mockResolvedValue(device({ storageContributionEnabled: true }));
     storageTargets.findOne.mockResolvedValue({
       id: 'storage-target-id',
       deviceId: 'device-id',
@@ -416,6 +431,14 @@ describe('DevicesService', () => {
 
     expect(result.availabilityStatus).toBe(DeviceStorageStatus.OFFLINE);
     expect(storageTargets.save).toHaveBeenCalledWith(expect.objectContaining({ availabilityStatus: DeviceStorageStatus.OFFLINE }));
+    expect(deviceStorageReplicas.update).toHaveBeenCalledWith(
+      { deviceId: 'device-id', status: DeviceStorageReplicaStatus.AVAILABLE },
+      { status: DeviceStorageReplicaStatus.OFFLINE },
+    );
+    expect(deviceAvailability.update).toHaveBeenCalledWith(
+      { deviceId: 'device-id', status: DeviceFileAvailabilityStatus.AVAILABLE },
+      { status: DeviceFileAvailabilityStatus.OFFLINE },
+    );
     expect(Object.values(DeviceStorageStatus)).not.toContain('MISSING');
   });
 });

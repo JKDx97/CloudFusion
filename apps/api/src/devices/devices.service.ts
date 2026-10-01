@@ -3,6 +3,8 @@ import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
 import { createHash, randomBytes } from 'node:crypto';
 import { DataSource, IsNull, LessThan, Repository } from 'typeorm';
 import { AuditService } from '../audit/audit.service';
+import { DeviceFileAvailability, DeviceFileAvailabilityStatus } from '../p2p/entities/device-file-availability.entity';
+import { DeviceStorageReplica, DeviceStorageReplicaStatus } from '../p2p/entities/device-storage-replica.entity';
 import { StorageTarget } from '../providers/object-storage/entities/storage-target.entity';
 import { DeviceStorageClass } from '../providers/object-storage/enums/device-storage-class.enum';
 import { DeviceStorageStatus } from '../providers/object-storage/enums/device-storage-status.enum';
@@ -40,6 +42,10 @@ export class DevicesService {
     private readonly audit: AuditService,
     @InjectRepository(StorageTarget)
     private readonly storageTargets: Repository<StorageTarget>,
+    @InjectRepository(DeviceStorageReplica)
+    private readonly deviceStorageReplicas: Repository<DeviceStorageReplica>,
+    @InjectRepository(DeviceFileAvailability)
+    private readonly deviceAvailability: Repository<DeviceFileAvailability>,
     @InjectDataSource() private readonly dataSource: DataSource,
   ) {}
 
@@ -222,9 +228,11 @@ export class DevicesService {
   async getStorageConfiguration(userId: string, deviceId: string): Promise<DeviceStorageConfiguration> {
     await this.getActive(userId, deviceId);
     const target = await this.storageTargets.findOne({ where: { deviceId } });
-    if (target?.enabled && target.availabilityStatus === DeviceStorageStatus.ONLINE && (!target.lastSeenAt || Date.now() - target.lastSeenAt.getTime() > DEVICE_STORAGE_HEARTBEAT_TTL_MS)) {
+    const stale = !!target?.enabled && (!target.lastSeenAt || Date.now() - target.lastSeenAt.getTime() > DEVICE_STORAGE_HEARTBEAT_TTL_MS);
+    if (target && stale && target.availabilityStatus !== DeviceStorageStatus.OFFLINE) {
       target.availabilityStatus = DeviceStorageStatus.OFFLINE;
       await this.storageTargets.save(target);
+      await this.markDeviceStorageOffline(deviceId);
     }
     return this.toPublicStorageConfiguration(deviceId, target);
   }
@@ -289,6 +297,9 @@ export class DevicesService {
       return { target: savedTarget, device };
     });
 
+    if (!result.device.storageContributionEnabled) {
+      await this.markDeviceStorageOffline(deviceId);
+    }
     await this.audit.record(userId, 'DEVICE_STORAGE_CONFIGURED', 'StorageTarget', result.target?.id ?? deviceId, {
       enabled: result.device.storageContributionEnabled,
       ...(dto.maxBytes !== undefined ? { maxBytes: dto.maxBytes } : {}),
@@ -317,6 +328,14 @@ export class DevicesService {
     await this.storageTargets.save(target);
     device.lastSeenAt = now;
     await this.devices.save(device);
+    await this.deviceStorageReplicas.update(
+      { deviceId, status: DeviceStorageReplicaStatus.OFFLINE },
+      {
+        status: DeviceStorageReplicaStatus.PENDING,
+        leaseExpiresAt: null,
+        lastError: 'Device reconnected; local replica must be verified before becoming available',
+      },
+    );
     return this.toPublicStorageConfiguration(deviceId, target);
   }
 
@@ -341,6 +360,7 @@ export class DevicesService {
         lastSeenAt: null,
       },
     );
+    await this.markDeviceStorageOffline(deviceId);
     await this.devices.save(device);
     await this.audit.record(userId, 'DEVICE_REVOKED', 'UserDevice', device.id);
     return { revoked: true };
@@ -356,6 +376,19 @@ export class DevicesService {
   private toPublicDevice(device: UserDevice): PublicDevice {
     const { installationId: _installationId, refreshTokenHash: _refreshTokenHash, peerPublicKey: _peerPublicKey, ...publicDevice } = device;
     return publicDevice;
+  }
+
+  private async markDeviceStorageOffline(deviceId: string): Promise<void> {
+    await Promise.all([
+      this.deviceStorageReplicas.update(
+        { deviceId, status: DeviceStorageReplicaStatus.AVAILABLE },
+        { status: DeviceStorageReplicaStatus.OFFLINE },
+      ),
+      this.deviceAvailability.update(
+        { deviceId, status: DeviceFileAvailabilityStatus.AVAILABLE },
+        { status: DeviceFileAvailabilityStatus.OFFLINE },
+      ),
+    ]);
   }
 
   private validatePeerIdentity(dto: RegisterDeviceDto): void {
