@@ -29,9 +29,20 @@ cloudfusion-node start
 
 The node can also serve verified local versions to other registered CloudFusion devices over the existing `/cloudfusion/file-chunk/1` protocol. In **Dispositivos**, enable **P2P**, **Compartir archivos locales**, and either **Descubrimiento LAN** or **P2P por Internet**. The node claims a one-use API ticket before sending and verifies that the connected PeerId is the exact authorized destination; the API rechecks both users' read permissions, including Workspace/share access, at authorization and claim time. Same-account membership or LAN discovery alone never grants file access. Availability leases are renewed in bounded batches every five minutes; stopped nodes become unavailable when their leases expire. LAN discovery uses temporary mDNS/QUIC routes and dials only for API-authorized transfers. Internet relay participation requires `CLOUDFUSION_RELAY_MULTIADDR` to contain the configured relay multiaddress ending in `/p2p/<relay-peer-id>` and the device's relay option to be enabled.
 
-## Device storage heartbeat
+## Dedicated device storage
 
-When a NAS device's storage contribution is enabled in **Settings > Devices**, `cloudfusion-node start` checks that setting once per minute and reports aggregate bytes used by files still present in its CloudFusion sync manifest at their expected size. Only the byte total is sent; local paths and filenames stay on the node. If the configured capacity is exceeded or a sync root is unavailable, the node does not report an online storage heartbeat. The API expires stale heartbeats to `OFFLINE` after three minutes. This reports device presence/capacity only; it does not yet allocate or replicate files onto device storage, and it does not replace cloud replicas.
+Device replicas are stored in a dedicated local folder, separate from every CloudFusion sync folder. Configure an existing folder on the NAS before enabling storage contribution, for example:
+
+```sh
+cloudfusion-node storage set --path /mnt/cloudfusion-storage
+cloudfusion-node storage show
+```
+
+The selected path and filenames stay on the node; they are not sent to the API. The node rejects symbolic-link roots, paths that overlap a sync folder, and changing to another folder while managed replicas are present. Keep this folder on storage with enough free space and normal backups for your device.
+
+After pairing, enable **Settings > Devices > Storage contribution** and set the device's capacity. While `cloudfusion-node start` is running, it checks the setting once per minute, reports only aggregate managed-replica bytes, and processes at most one whole-file replica assignment per sync cycle. Downloads are staged in the dedicated folder; the node verifies the assigned size and SHA-256 before atomically installing the file and confirming it to CloudFusion. Assignment is opt-in, capacity-limited, and only offered when a healthy cloud replica exists. This is whole-file storage, not distributed chunks, and it does not replace cloud replicas.
+
+If the dedicated folder is unavailable or its managed data exceeds the configured capacity, the node stops reporting a healthy storage heartbeat. The API expires stale heartbeats to `OFFLINE` after three minutes. On reconnection, stored replicas must be revalidated before they are made available to peers.
 
 When a remote version is needed, the node checks CloudFusion's permission-filtered availability list and tries up to eight connected or relay-routable sources, preferring LAN/direct paths. It uses a one-use device-bound ticket, validates each response, reports progress, and verifies the complete size and SHA-256 before installation. If no peer can deliver the exact version, sync falls back to the existing authenticated CloudFusion download. Receiving works even when this node is not allowed to serve its own files. A packaged Linux/NAS release and relay infrastructure provisioning remain follow-up work. P2P remains opt-in and disabled by default.
 
