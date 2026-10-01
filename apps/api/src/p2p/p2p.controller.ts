@@ -20,6 +20,8 @@ import { AuthorizePeerTransferDto } from './dto/authorize-peer-transfer.dto';
 import { ClaimPeerTransferDto } from './dto/claim-peer-transfer.dto';
 import { ListAvailabilityDto } from './dto/list-availability.dto';
 import { UpdatePeerTransferStateDto } from './dto/update-peer-transfer-state.dto';
+import { CompleteDeviceStorageReplicaDto } from './dto/complete-device-storage-replica.dto';
+import { DeviceStorageReplicaService } from './device-storage-replica.service';
 import { P2pService } from './p2p.service';
 
 @ApiTags('p2p')
@@ -27,7 +29,28 @@ import { P2pService } from './p2p.service';
 @UseGuards(AccessTokenGuard)
 @Controller('p2p')
 export class P2pController {
-  constructor(private readonly p2p: P2pService) {}
+  constructor(
+    private readonly p2p: P2pService,
+    private readonly deviceStorage: DeviceStorageReplicaService,
+  ) {}
+
+  @Post('storage/replicas/next')
+  @Throttle({ default: { limit: 30, ttl: 60_000 } })
+  @ApiOperation({ summary: 'Assign one whole-file device replica after checking cloud durability and free device capacity' })
+  nextDeviceStorageReplica(@Req() request: AuthenticatedRequest) {
+    return this.deviceStorage.next(request.user.sub, request.user.deviceId);
+  }
+
+  @Post('storage/replicas/:id/complete')
+  @Throttle({ default: { limit: 60, ttl: 60_000 } })
+  @ApiOperation({ summary: 'Confirm a device replica after the client verifies its exact size and SHA-256' })
+  completeDeviceStorageReplica(
+    @Req() request: AuthenticatedRequest,
+    @Param('id', new ParseUUIDPipe()) id: string,
+    @Body() dto: CompleteDeviceStorageReplicaDto,
+  ) {
+    return this.deviceStorage.complete(request.user.sub, request.user.deviceId, id, dto);
+  }
 
   @Post('availability')
   @ApiOperation({ summary: 'Advertise a locally cached, authorized CloudFusion file version' })
