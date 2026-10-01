@@ -20,7 +20,8 @@ use std::{
     str::FromStr,
     time::{Duration, Instant, SystemTime},
 };
-use tokio::sync::watch;
+use tokio::io::AsyncWriteExt;
+use tokio::sync::{mpsc, oneshot, watch};
 use uuid::Uuid;
 
 const TRANSFER_PROTOCOL: &str = "/cloudfusion/file-chunk/1";
@@ -34,6 +35,91 @@ const AVAILABILITY_RENEW_INTERVAL: Duration = Duration::from_secs(5 * 60);
 pub(crate) struct MeshCredentials {
     pub(crate) api_url: String,
     pub(crate) access_token: String,
+}
+
+pub(crate) struct MeshCommand {
+    peer_id: PeerId,
+    request: ChunkRequest,
+    response: oneshot::Sender<Result<ChunkResponse, String>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct MeshHandle {
+    sender: mpsc::Sender<MeshCommand>,
+    connected_peers: std::sync::Arc<std::sync::RwLock<HashSet<String>>>,
+    transfer_paths: std::sync::Arc<std::sync::RwLock<HashMap<String, String>>>,
+    relay_configured: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl MeshHandle {
+    pub(crate) fn channel() -> (Self, mpsc::Receiver<MeshCommand>) {
+        let (sender, receiver) = mpsc::channel(32);
+        (
+            Self {
+                sender,
+                connected_peers: std::sync::Arc::default(),
+                transfer_paths: std::sync::Arc::default(),
+                relay_configured: std::sync::Arc::default(),
+            },
+            receiver,
+        )
+    }
+
+    fn is_peer_connected(&self, peer_id: &PeerId) -> bool {
+        self.connected_peers
+            .read()
+            .is_ok_and(|peers| peers.contains(&peer_id.to_string()))
+    }
+
+    fn record_peer_connection(&self, peer_id: &PeerId, transport: &str) {
+        if let Ok(mut peers) = self.connected_peers.write() {
+            peers.insert(peer_id.to_string());
+        }
+        if let Ok(mut paths) = self.transfer_paths.write() {
+            paths.insert(peer_id.to_string(), transport.to_owned());
+        }
+    }
+
+    fn remove_peer_connection(&self, peer_id: &PeerId) {
+        if let Ok(mut peers) = self.connected_peers.write() {
+            peers.remove(&peer_id.to_string());
+        }
+        if let Ok(mut paths) = self.transfer_paths.write() {
+            paths.remove(&peer_id.to_string());
+        }
+    }
+
+    fn transfer_path(&self, peer_id: &PeerId) -> String {
+        self.transfer_paths
+            .read()
+            .ok()
+            .and_then(|paths| paths.get(&peer_id.to_string()).cloned())
+            .unwrap_or_else(|| "P2P_DIRECT".to_owned())
+    }
+
+    fn can_attempt_relay(&self) -> bool {
+        self.relay_configured
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    async fn request_chunk(
+        &self,
+        peer_id: PeerId,
+        request: ChunkRequest,
+    ) -> Result<ChunkResponse, String> {
+        let (response, receiver) = oneshot::channel();
+        self.sender
+            .send(MeshCommand {
+                peer_id,
+                request,
+                response,
+            })
+            .await
+            .map_err(|_| "The local P2P mesh is not running".to_owned())?;
+        receiver
+            .await
+            .map_err(|_| "The P2P peer did not return a response".to_owned())?
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq)]
@@ -76,6 +162,384 @@ struct BatchAvailabilityResult {
     node_id: String,
     version_id: String,
     advertised: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AvailablePeer {
+    device_id: String,
+    peer_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TransferAuthorization {
+    transfer: PeerTransferSession,
+    ticket: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PeerTransferSession {
+    id: String,
+    source_device_id: String,
+    destination_device_id: String,
+    node_id: String,
+    version_id: String,
+    content_hash: String,
+    total_bytes: String,
+    status: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthorizePeerTransfer<'a> {
+    source_device_id: &'a str,
+    node_id: &'a str,
+    version_id: &'a str,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PeerTransferState<'a> {
+    status: &'a str,
+    transport: &'a str,
+    bytes_transferred: String,
+}
+
+pub(crate) async fn download_from_available_peer(
+    client: &reqwest::Client,
+    api_url: &str,
+    access_token: &str,
+    destination_device_id: &str,
+    node_id: &str,
+    version_id: &str,
+    expected_hash: &str,
+    expected_size: u64,
+    destination: &std::path::Path,
+    mesh: &MeshHandle,
+) -> Result<bool, String> {
+    if Uuid::parse_str(destination_device_id).is_err()
+        || Uuid::parse_str(node_id).is_err()
+        || Uuid::parse_str(version_id).is_err()
+        || expected_hash.len() != 64
+        || !expected_hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("P2P sync metadata is invalid".to_owned());
+    }
+
+    let mut availability_url = reqwest::Url::parse(&format!(
+        "{}/p2p/availability",
+        api_url.trim_end_matches('/')
+    ))
+    .map_err(|_| "CloudFusion API address is invalid".to_owned())?;
+    availability_url
+        .query_pairs_mut()
+        .append_pair("nodeId", node_id)
+        .append_pair("versionId", version_id);
+    let response = client
+        .get(availability_url)
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|_| "Could not query CloudFusion P2P availability".to_owned())?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "CloudFusion rejected the P2P availability query ({})",
+            response.status()
+        ));
+    }
+    let envelope = response
+        .json::<ApiEnvelope<Vec<AvailablePeer>>>()
+        .await
+        .map_err(|_| "CloudFusion returned invalid P2P availability".to_owned())?;
+    let mut peers = envelope
+        .data
+        .into_iter()
+        .filter_map(|peer| {
+            if peer.device_id == destination_device_id {
+                return None;
+            }
+            let peer_id = PeerId::from_str(&peer.peer_id).ok()?;
+            let transport = if mesh.is_peer_connected(&peer_id) {
+                mesh.transfer_path(&peer_id)
+            } else if mesh.can_attempt_relay() {
+                "P2P_RELAY".to_owned()
+            } else {
+                return None;
+            };
+            Some((peer, peer_id, transport))
+        })
+        .collect::<Vec<_>>();
+    peers.sort_by_key(|(_, _, transport)| match transport.as_str() {
+        "LAN_DIRECT" => 0,
+        "P2P_DIRECT" => 1,
+        "P2P_RELAY" => 2,
+        _ => 3,
+    });
+
+    for (peer, peer_id, transport) in peers.into_iter().take(8) {
+        let authorization = client
+            .post(format!(
+                "{}/p2p/transfers/authorize",
+                api_url.trim_end_matches('/')
+            ))
+            .bearer_auth(access_token)
+            .json(&AuthorizePeerTransfer {
+                source_device_id: &peer.device_id,
+                node_id,
+                version_id,
+            })
+            .send()
+            .await
+            .map_err(|_| "Could not authorize the P2P source device".to_owned())?;
+        if !authorization.status().is_success() {
+            eprintln!(
+                "CloudFusion did not authorize P2P source {} ({})",
+                peer.device_id,
+                authorization.status()
+            );
+            continue;
+        }
+        let authorization = authorization
+            .json::<ApiEnvelope<TransferAuthorization>>()
+            .await
+            .map_err(|_| "CloudFusion returned invalid P2P authorization".to_owned())?
+            .data;
+        let transfer = authorization.transfer;
+        if Uuid::parse_str(&transfer.id).is_err()
+            || transfer.source_device_id != peer.device_id
+            || transfer.destination_device_id != destination_device_id
+            || transfer.node_id != node_id
+            || transfer.version_id != version_id
+            || !transfer.content_hash.eq_ignore_ascii_case(expected_hash)
+            || transfer.total_bytes.parse::<u64>().ok() != Some(expected_size)
+            || transfer.status != "AUTHORIZED"
+            || authorization.ticket.is_empty()
+            || authorization.ticket.len() > 8192
+        {
+            cancel_peer_transfer(client, api_url, access_token, &transfer.id).await;
+            eprintln!("CloudFusion returned mismatched P2P transfer metadata");
+            continue;
+        }
+
+        let output = match tokio::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(destination)
+            .await
+        {
+            Ok(output) => output,
+            Err(_) => {
+                cancel_peer_transfer(client, api_url, access_token, &transfer.id).await;
+                return Err("Could not safely create the temporary P2P sync file".to_owned());
+            }
+        };
+        let result = receive_peer_file(
+            client,
+            api_url,
+            access_token,
+            mesh,
+            &peer_id,
+            &transport,
+            &transfer,
+            &authorization.ticket,
+            expected_hash,
+            expected_size,
+            output,
+        )
+        .await;
+        match result {
+            Ok(()) => return Ok(true),
+            Err(error) => {
+                let _ = tokio::fs::remove_file(destination).await;
+                cancel_peer_transfer(client, api_url, access_token, &transfer.id).await;
+                eprintln!("P2P download from {} failed: {error}", peer.device_id);
+            }
+        }
+    }
+    Ok(false)
+}
+
+async fn receive_peer_file(
+    client: &reqwest::Client,
+    api_url: &str,
+    access_token: &str,
+    mesh: &MeshHandle,
+    peer_id: &PeerId,
+    transport: &str,
+    transfer: &PeerTransferSession,
+    ticket: &str,
+    expected_hash: &str,
+    expected_size: u64,
+    mut output: tokio::fs::File,
+) -> Result<(), String> {
+    let mut hasher = Sha256::new();
+    let mut offset = 0_u64;
+    let mut first_request = true;
+    let mut last_reported = 0_u64;
+    let mut active_transport = transport.to_owned();
+    loop {
+        let request = ChunkRequest {
+            transfer_id: transfer.id.clone(),
+            ticket: first_request.then(|| ticket.to_owned()),
+            content_hash: expected_hash.to_ascii_lowercase(),
+            total_bytes: expected_size,
+            offset,
+            max_bytes: MAX_CHUNK_BYTES,
+        };
+        let response = mesh.request_chunk(peer_id.clone(), request).await?;
+        if mesh.is_peer_connected(peer_id) {
+            active_transport = mesh.transfer_path(peer_id);
+        }
+        first_request = false;
+        let next_offset = validate_chunk_response(
+            &response,
+            &transfer.id,
+            expected_hash,
+            expected_size,
+            offset,
+        )?;
+        output
+            .write_all(&response.bytes)
+            .await
+            .map_err(|_| "Could not write a P2P sync block".to_owned())?;
+        hasher.update(&response.bytes);
+        offset = next_offset;
+        if offset == expected_size
+            || last_reported == 0
+            || offset.saturating_sub(last_reported) >= 4 * 1024 * 1024
+        {
+            update_peer_transfer_state(
+                client,
+                api_url,
+                access_token,
+                &transfer.id,
+                "TRANSFERRING",
+                &active_transport,
+                offset,
+            )
+            .await?;
+            last_reported = offset;
+        }
+        if response.finished {
+            break;
+        }
+    }
+    output
+        .flush()
+        .await
+        .map_err(|_| "Could not flush the P2P sync file".to_owned())?;
+    output
+        .sync_all()
+        .await
+        .map_err(|_| "Could not persist the P2P sync file".to_owned())?;
+    drop(output);
+    let actual_hash = crate::sync::hex(&hasher.finalize());
+    if offset != expected_size || !actual_hash.eq_ignore_ascii_case(expected_hash) {
+        return Err("P2P file failed its expected size or SHA-256 check".to_owned());
+    }
+    update_peer_transfer_state(
+        client,
+        api_url,
+        access_token,
+        &transfer.id,
+        "VERIFYING",
+        &active_transport,
+        offset,
+    )
+    .await?;
+    update_peer_transfer_state(
+        client,
+        api_url,
+        access_token,
+        &transfer.id,
+        "COMPLETED",
+        &active_transport,
+        offset,
+    )
+    .await
+}
+
+fn validate_chunk_response(
+    response: &ChunkResponse,
+    transfer_id: &str,
+    expected_hash: &str,
+    expected_size: u64,
+    expected_offset: u64,
+) -> Result<u64, String> {
+    if let Some(error) = response.error.as_deref() {
+        return Err(format!("P2P source rejected the request: {error}"));
+    }
+    if response.transfer_id != transfer_id
+        || response.offset != expected_offset
+        || response.total_bytes != expected_size
+        || !response.content_hash.eq_ignore_ascii_case(expected_hash)
+        || response.bytes.len() > MAX_CHUNK_BYTES as usize
+    {
+        return Err("P2P source returned a block outside the authorized file".to_owned());
+    }
+    let next_offset = expected_offset
+        .checked_add(response.bytes.len() as u64)
+        .ok_or_else(|| "P2P byte count overflowed".to_owned())?;
+    if next_offset > expected_size
+        || (response.bytes.is_empty() && expected_offset < expected_size)
+        || response.finished != (next_offset == expected_size)
+    {
+        return Err("P2P source returned an incomplete or oversized block".to_owned());
+    }
+    Ok(next_offset)
+}
+
+async fn update_peer_transfer_state(
+    client: &reqwest::Client,
+    api_url: &str,
+    access_token: &str,
+    transfer_id: &str,
+    status: &str,
+    transport: &str,
+    bytes: u64,
+) -> Result<(), String> {
+    let response = client
+        .post(format!(
+            "{}/p2p/transfers/{transfer_id}/state",
+            api_url.trim_end_matches('/')
+        ))
+        .bearer_auth(access_token)
+        .json(&PeerTransferState {
+            status,
+            transport,
+            bytes_transferred: bytes.to_string(),
+        })
+        .send()
+        .await
+        .map_err(|_| "Could not report P2P sync progress".to_owned())?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "CloudFusion rejected P2P sync progress ({})",
+            response.status()
+        ));
+    }
+    Ok(())
+}
+
+async fn cancel_peer_transfer(
+    client: &reqwest::Client,
+    api_url: &str,
+    access_token: &str,
+    transfer_id: &str,
+) {
+    if Uuid::parse_str(transfer_id).is_err() {
+        return;
+    }
+    let _ = client
+        .post(format!(
+            "{}/p2p/transfers/{transfer_id}/cancel",
+            api_url.trim_end_matches('/')
+        ))
+        .bearer_auth(access_token)
+        .send()
+        .await;
 }
 
 #[derive(Debug, Deserialize)]
@@ -189,6 +653,8 @@ pub(crate) async fn run_mesh(
     config: NodeConfig,
     mut credentials: watch::Receiver<MeshCredentials>,
     mut shutdown: watch::Receiver<bool>,
+    handle: MeshHandle,
+    mut commands: mpsc::Receiver<MeshCommand>,
 ) -> Result<(), String> {
     let private_key = STANDARD
         .decode(&config.peer_private_key)
@@ -232,7 +698,7 @@ pub(crate) async fn run_mesh(
         if device.revoked_at.is_some() {
             return Err("This node has been revoked".to_owned());
         }
-        if !can_serve(device) {
+        if !can_join_mesh(device) {
             wait_for_poll(&mut credentials, &mut shutdown).await?;
             continue;
         }
@@ -253,6 +719,8 @@ pub(crate) async fn run_mesh(
             trusted,
             credentials.clone(),
             shutdown.clone(),
+            handle.clone(),
+            &mut commands,
         )
         .await?;
     }
@@ -260,9 +728,11 @@ pub(crate) async fn run_mesh(
 }
 
 fn can_serve(device: &DeviceSettings) -> bool {
-    device.p2p_enabled
-        && device.serve_local_files
-        && (device.lan_discovery_enabled || device.internet_p2p_enabled)
+    can_join_mesh(device) && device.serve_local_files
+}
+
+fn can_join_mesh(device: &DeviceSettings) -> bool {
+    device.p2p_enabled && (device.lan_discovery_enabled || device.internet_p2p_enabled)
 }
 
 async fn wait_for_poll(
@@ -309,6 +779,8 @@ async fn run_mesh_active(
     mut trusted: HashSet<String>,
     mut credentials: watch::Receiver<MeshCredentials>,
     mut shutdown: watch::Receiver<bool>,
+    handle: MeshHandle,
+    commands: &mut mpsc::Receiver<MeshCommand>,
 ) -> Result<(), String> {
     let local_file_index = std::sync::Arc::new(std::sync::RwLock::new(HashMap::new()));
     let local_peer_id = keypair.public().to_peer_id();
@@ -317,6 +789,10 @@ async fn run_mesh_active(
     } else {
         None
     };
+    handle.relay_configured.store(
+        relay_address.is_some(),
+        std::sync::atomic::Ordering::Release,
+    );
     let relay_peer_id = relay_address.as_ref().and_then(relay_peer_id);
     let mdns = if settings.lan_discovery_enabled {
         Some(
@@ -363,18 +839,21 @@ async fn run_mesh_active(
     println!("P2P file sharing active for node {}", local_peer_id);
 
     let (availability_stop_tx, availability_stop_rx) = watch::channel(false);
-    let mut availability_task = tokio::spawn(availability_worker(
-        client.clone(),
-        config.sync_roots.clone(),
-        credentials.clone(),
-        availability_stop_rx,
-        local_file_index.clone(),
-    ));
+    let availability_task = can_serve(&settings).then(|| {
+        tokio::spawn(availability_worker(
+            client.clone(),
+            config.sync_roots.clone(),
+            credentials.clone(),
+            availability_stop_rx,
+            local_file_index.clone(),
+        ))
+    });
 
     let mut poll = tokio::time::interval(API_POLL_INTERVAL);
     poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     poll.tick().await;
     let mut source_transfers: HashMap<String, SourceTransfer> = HashMap::new();
+    let mut pending_requests = HashMap::new();
     let mut lan_peer_addresses: HashMap<PeerId, HashSet<Multiaddr>> = HashMap::new();
     let mut terminal_error = None;
     'mesh_loop: loop {
@@ -385,6 +864,21 @@ async fn run_mesh_active(
             changed = credentials.changed() => {
                 if changed.is_err() { break; }
             }
+            command = commands.recv() => {
+                if let Some(command) = command {
+                    if !trusted.contains(&command.peer_id.to_string()) {
+                        let _ = command.response.send(Err("The source device is not trusted by CloudFusion".to_owned()));
+                    } else {
+                        if !handle.is_peer_connected(&command.peer_id) {
+                            if let Some(address) = relay_address.as_ref().and_then(|relay| relay_peer_address(relay, &command.peer_id)) {
+                                swarm.add_peer_address(command.peer_id.clone(), address);
+                            }
+                        }
+                        let request_id = swarm.behaviour_mut().transfer.send_request(&command.peer_id, command.request);
+                        pending_requests.insert(request_id, command.response);
+                    }
+                }
+            }
             _ = poll.tick() => {
                 let auth = credentials.borrow().clone();
                 let devices = match list_devices(client, &auth).await {
@@ -393,7 +887,7 @@ async fn run_mesh_active(
                 };
                 let Some(current) = devices.iter().find(|item| item.id == settings.id) else { terminal_error = Some("This node is no longer registered in CloudFusion".to_owned()); break 'mesh_loop; };
                 if current.revoked_at.is_some() { terminal_error = Some("This node has been revoked".to_owned()); break 'mesh_loop; }
-                if !can_serve(current) || current.lan_discovery_enabled != settings.lan_discovery_enabled || current.internet_p2p_enabled != settings.internet_p2p_enabled || current.relay_allowed != settings.relay_allowed {
+                if !can_join_mesh(current) || current.serve_local_files != settings.serve_local_files || current.lan_discovery_enabled != settings.lan_discovery_enabled || current.internet_p2p_enabled != settings.internet_p2p_enabled || current.relay_allowed != settings.relay_allowed {
                     break 'mesh_loop;
                 }
                 settings = current.clone();
@@ -412,11 +906,21 @@ async fn run_mesh_active(
                         if let Some(addresses) = lan_peer_addresses.get_mut(&peer_id) { addresses.remove(&address); if addresses.is_empty() { lan_peer_addresses.remove(&peer_id); } }
                     }
                 }
-                SwarmEvent::Behaviour(MeshEvent::Transfer(request_response::Event::Message { peer, message, .. })) => {
-                    if let Message::Request { request, channel, .. } = message {
+                SwarmEvent::Behaviour(MeshEvent::Transfer(request_response::Event::Message { peer, message, .. })) => match message {
+                    Message::Request { request, channel, .. } => {
                         let auth = credentials.borrow().clone();
                         let response = serve_chunk_request(peer, request, local_peer_id, &trusted, &local_file_index, client, &auth, &mut source_transfers).await;
                         let _ = swarm.behaviour_mut().transfer.send_response(channel, response);
+                    }
+                    Message::Response { request_id, response } => {
+                        if let Some(sender) = pending_requests.remove(&request_id) {
+                            let _ = sender.send(Ok(response));
+                        }
+                    }
+                },
+                SwarmEvent::Behaviour(MeshEvent::Transfer(request_response::Event::OutboundFailure { request_id, error, .. })) => {
+                    if let Some(sender) = pending_requests.remove(&request_id) {
+                        let _ = sender.send(Err(format!("P2P request failed: {error}")));
                     }
                 }
                 SwarmEvent::Behaviour(MeshEvent::RelayClient(event)) => { eprintln!("P2P relay event: {event:?}"); }
@@ -426,16 +930,41 @@ async fn run_mesh_active(
                         if let Some(address) = relay_address.as_ref() { let _ = swarm.listen_on(address.clone().with(Protocol::P2pCircuit)); }
                     } else if !trusted.contains(&peer_id.to_string()) {
                         let _ = swarm.disconnect_peer_id(peer_id);
-                    } else if endpoint.is_relayed() {
-                        eprintln!("P2P peer connected through relay");
+                    } else {
+                        let transport = if endpoint.is_relayed() {
+                            eprintln!("P2P peer connected through relay");
+                            "P2P_RELAY"
+                        } else if lan_peer_addresses.contains_key(&peer_id) {
+                            "LAN_DIRECT"
+                        } else {
+                            "P2P_DIRECT"
+                        };
+                        handle.record_peer_connection(&peer_id, transport);
                     }
+                }
+                SwarmEvent::ConnectionClosed { peer_id, num_established, .. } if num_established == 0 => {
+                    handle.remove_peer_connection(&peer_id);
                 }
                 _ => {}
             }
         }
     }
-    let _ = availability_stop_tx.send(true);
-    let _ = (&mut availability_task).await;
+    if let Ok(mut peers) = handle.connected_peers.write() {
+        peers.clear();
+    }
+    if let Ok(mut paths) = handle.transfer_paths.write() {
+        paths.clear();
+    }
+    handle
+        .relay_configured
+        .store(false, std::sync::atomic::Ordering::Release);
+    for (_, sender) in pending_requests {
+        let _ = sender.send(Err("The P2P mesh stopped before replying".to_owned()));
+    }
+    if let Some(task) = availability_task {
+        let _ = availability_stop_tx.send(true);
+        let _ = task.await;
+    }
     terminal_error.map_or(Ok(()), Err)
 }
 
@@ -840,9 +1369,22 @@ fn relay_peer_id(address: &Multiaddr) -> Option<PeerId> {
     }
 }
 
+fn relay_peer_address(relay: &Multiaddr, peer_id: &PeerId) -> Option<Multiaddr> {
+    relay_peer_id(relay)?;
+    let mut address = relay.clone();
+    address.push(Protocol::P2pCircuit);
+    address.push(Protocol::P2p(peer_id.clone()));
+    Some(address)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{can_serve, valid_resume_offset, DeviceSettings};
+    use super::{
+        can_join_mesh, can_serve, relay_peer_address, valid_resume_offset, validate_chunk_response,
+        ChunkResponse, DeviceSettings, MAX_CHUNK_BYTES,
+    };
+    use libp2p::{Multiaddr, PeerId};
+    use std::str::FromStr;
 
     #[test]
     fn sharing_requires_explicit_peer_and_file_serving_opt_in() {
@@ -857,10 +1399,13 @@ mod tests {
             revoked_at: None,
         };
         assert!(can_serve(&device));
+        assert!(can_join_mesh(&device));
         device.serve_local_files = false;
         assert!(!can_serve(&device));
+        assert!(can_join_mesh(&device));
         device.serve_local_files = true;
         device.p2p_enabled = false;
+        assert!(!can_join_mesh(&device));
         assert!(!can_serve(&device));
     }
 
@@ -869,6 +1414,44 @@ mod tests {
         assert!(valid_resume_offset(5, 8, 10));
         assert!(!valid_resume_offset(9, 8, 10));
         assert!(!valid_resume_offset(11, 12, 10));
+    }
+
+    #[test]
+    fn received_peer_chunks_must_match_the_authorized_version_and_offset() {
+        let response = ChunkResponse {
+            transfer_id: "transfer".to_owned(),
+            content_hash: "ab".repeat(32),
+            total_bytes: 5,
+            offset: 0,
+            bytes: vec![1, 2],
+            finished: false,
+            error: None,
+        };
+        assert_eq!(
+            validate_chunk_response(&response, "transfer", &"ab".repeat(32), 5, 0),
+            Ok(2)
+        );
+        assert!(validate_chunk_response(&response, "other", &"ab".repeat(32), 5, 0).is_err());
+        assert!(validate_chunk_response(&response, "transfer", &"cd".repeat(32), 5, 0).is_err());
+        assert!(validate_chunk_response(&response, "transfer", &"ab".repeat(32), 5, 1).is_err());
+
+        let oversized = ChunkResponse {
+            bytes: vec![0; MAX_CHUNK_BYTES as usize + 1],
+            ..response
+        };
+        assert!(validate_chunk_response(&oversized, "transfer", &"ab".repeat(32), 5, 0).is_err());
+    }
+
+    #[test]
+    fn relay_addresses_target_only_the_requested_peer() {
+        let relay_id = PeerId::random();
+        let target = PeerId::random();
+        let relay = Multiaddr::from_str(&format!("/ip4/203.0.113.8/tcp/4001/p2p/{relay_id}"))
+            .expect("relay address is valid");
+        let address = relay_peer_address(&relay, &target).expect("relay route exists");
+        assert!(address
+            .to_string()
+            .ends_with(&format!("/p2p-circuit/p2p/{target}")));
     }
 }
 

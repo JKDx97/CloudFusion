@@ -270,6 +270,7 @@ pub(crate) async fn run_daemon() -> Result<(), String> {
     );
     let client = build_client()?;
     let session = refresh_session(&client, &mut config).await?;
+    let device_id = session.device_id.clone();
     let initial_expiry = token_expiration(&session.access_token)
         .unwrap_or_else(unix_time_seconds)
         .max(unix_time_seconds());
@@ -279,10 +280,13 @@ pub(crate) async fn run_daemon() -> Result<(), String> {
         access_token: session.access_token,
     });
     let (mesh_stop_tx, mesh_stop_rx) = watch::channel(false);
+    let (mesh_handle, mesh_commands) = crate::mesh::MeshHandle::channel();
     let mut mesh_task = tokio::spawn(crate::mesh::run_mesh(
         config.clone(),
         credentials_rx,
         mesh_stop_rx,
+        mesh_handle.clone(),
+        mesh_commands,
     ));
     let mut ticker = tokio::time::interval(Duration::from_secs(30));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -315,15 +319,29 @@ pub(crate) async fn run_daemon() -> Result<(), String> {
                     });
                 }
                 let token = access_token.as_ref().map(|(value, _)| value.as_str()).unwrap_or_default();
-                sync_cycle(&client, &config.api_url, token, &config.sync_roots).await;
+                sync_cycle(
+                    &client,
+                    &config.api_url,
+                    token,
+                    &device_id,
+                    &config.sync_roots,
+                    &mesh_handle,
+                ).await;
             }
         }
     }
 }
 
-async fn sync_cycle(client: &Client, api_url: &str, token: &str, roots: &[NodeSyncRoot]) {
+async fn sync_cycle(
+    client: &Client,
+    api_url: &str,
+    token: &str,
+    device_id: &str,
+    roots: &[NodeSyncRoot],
+    mesh: &crate::mesh::MeshHandle,
+) {
     for root in roots {
-        match sync_root(client, api_url, token, root).await {
+        match sync_root(client, api_url, token, device_id, root, mesh).await {
             Ok((uploaded, downloaded, conflicts)) => println!(
                 "Sync {}: {uploaded} uploaded, {downloaded} downloaded, {conflicts} conflict copy/copies",
                 root.path
@@ -356,7 +374,9 @@ async fn sync_root(
     client: &Client,
     api_url: &str,
     token: &str,
+    device_id: &str,
     root: &NodeSyncRoot,
+    mesh: &crate::mesh::MeshHandle,
 ) -> Result<(usize, usize, usize), String> {
     validate_root(root)?;
     let mut manifest = load_manifest()?;
@@ -443,6 +463,8 @@ async fn sync_root(
                         &remote_version,
                         &local_path,
                         Some(previous),
+                        device_id,
+                        mesh,
                     )
                     .await?;
                     updated.insert(local_path, make_synced(remote, &remote_version));
@@ -460,6 +482,8 @@ async fn sync_root(
                     &remote_version,
                     &conflict_path,
                     None,
+                    device_id,
+                    mesh,
                 )
                 .await?;
                 updated.insert(conflict_path, make_synced(remote, &remote_version));
@@ -497,6 +521,8 @@ async fn sync_root(
             &remote_version,
             &destination,
             None,
+            device_id,
+            mesh,
         )
         .await?;
         if destination != remote.relative_path {
@@ -793,6 +819,8 @@ async fn download_remote(
     version: &RemoteVersion,
     target_relative: &str,
     replace_baseline: Option<&SyncedFile>,
+    device_id: &str,
+    mesh: &crate::mesh::MeshHandle,
 ) -> Result<(), String> {
     validate_relative_path(target_relative)?;
     let target = safe_target(&root.path, target_relative, true)?;
@@ -813,72 +841,46 @@ async fn download_remote(
             ".cloudfusion-node-{}.download",
             Uuid::new_v4().simple()
         ));
-    let endpoint = format!(
-        "{}/virtual-drive/nodes/{}/versions/{}/download",
-        api_url.trim_end_matches('/'),
-        remote.node.id,
-        version.id
-    );
-    let response = client
-        .get(endpoint)
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|_| "Could not connect to CloudFusion for sync download".to_owned())?;
-    if !response.status().is_success() {
-        return Err(format!(
-            "CloudFusion rejected sync download (HTTP {})",
-            response.status()
-        ));
-    }
-    if response
-        .content_length()
-        .is_some_and(|length| length != version.size)
+    let downloaded_from_peer = match crate::mesh::download_from_available_peer(
+        client,
+        api_url,
+        token,
+        device_id,
+        &remote.node.id,
+        &version.id,
+        &version.checksum,
+        version.size,
+        &stage,
+        mesh,
+    )
+    .await
     {
-        return Err("CloudFusion advertised an unexpected download size".to_owned());
-    }
-    let mut output = tokio::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(&stage)
-        .await
-        .map_err(|_| "Could not create the temporary sync download".to_owned())?;
-    let result = async {
-        let mut stream = response.bytes_stream();
-        let mut hasher = Sha256::new();
-        let mut received = 0u64;
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|_| "Sync download was interrupted".to_owned())?;
-            received = received
-                .checked_add(chunk.len() as u64)
-                .ok_or_else(|| "Downloaded file is too large".to_owned())?;
-            if received > version.size {
-                return Err("CloudFusion sent more bytes than the version size".to_owned());
-            }
-            hasher.update(&chunk);
-            output
-                .write_all(&chunk)
-                .await
-                .map_err(|_| "Could not write a downloaded file block".to_owned())?;
+        Ok(downloaded) => downloaded,
+        Err(error) => {
+            eprintln!(
+                "P2P unavailable for {}; using CloudFusion download: {error}",
+                remote.node.name
+            );
+            false
         }
-        output
-            .flush()
-            .await
-            .map_err(|_| "Could not finish the temporary download".to_owned())?;
-        output
-            .sync_all()
-            .await
-            .map_err(|_| "Could not persist the temporary download".to_owned())?;
-        if received != version.size
-            || hex(&hasher.finalize()).to_lowercase() != version.checksum.to_lowercase()
-        {
-            return Err("Downloaded file failed size or SHA-256 verification".to_owned());
-        }
-        Ok::<(), String>(())
-    }
-    .await;
-    drop(output);
-    if let Err(error) = result {
+    };
+    if downloaded_from_peer {
+        println!(
+            "Received {} from a connected CloudFusion peer",
+            remote.node.name
+        );
+    } else if let Err(error) = download_to_stage_from_cloud(
+        client,
+        api_url,
+        token,
+        &remote.node.id,
+        &version.id,
+        &version.checksum,
+        version.size,
+        &stage,
+    )
+    .await
+    {
         let _ = tokio::fs::remove_file(&stage).await;
         return Err(error);
     }
@@ -939,6 +941,86 @@ async fn download_remote(
     }
     if let Some(backup_path) = backup {
         let _ = fs::remove_file(backup_path);
+    }
+    Ok(())
+}
+
+async fn download_to_stage_from_cloud(
+    client: &Client,
+    api_url: &str,
+    token: &str,
+    node_id: &str,
+    version_id: &str,
+    expected_checksum: &str,
+    expected_size: u64,
+    stage: &Path,
+) -> Result<(), String> {
+    let endpoint = format!(
+        "{}/virtual-drive/nodes/{node_id}/versions/{version_id}/download",
+        api_url.trim_end_matches('/')
+    );
+    let response = client
+        .get(endpoint)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|_| "Could not connect to CloudFusion for sync download".to_owned())?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "CloudFusion rejected sync download (HTTP {})",
+            response.status()
+        ));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length != expected_size)
+    {
+        return Err("CloudFusion advertised an unexpected download size".to_owned());
+    }
+    let mut output = tokio::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(stage)
+        .await
+        .map_err(|_| "Could not create the temporary sync download".to_owned())?;
+    let result = async {
+        let mut stream = response.bytes_stream();
+        let mut hasher = Sha256::new();
+        let mut received = 0u64;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|_| "Sync download was interrupted".to_owned())?;
+            received = received
+                .checked_add(chunk.len() as u64)
+                .ok_or_else(|| "Downloaded file is too large".to_owned())?;
+            if received > expected_size {
+                return Err("CloudFusion sent more bytes than the version size".to_owned());
+            }
+            hasher.update(&chunk);
+            output
+                .write_all(&chunk)
+                .await
+                .map_err(|_| "Could not write a downloaded file block".to_owned())?;
+        }
+        output
+            .flush()
+            .await
+            .map_err(|_| "Could not finish the temporary download".to_owned())?;
+        output
+            .sync_all()
+            .await
+            .map_err(|_| "Could not persist the temporary download".to_owned())?;
+        if received != expected_size
+            || !hex(&hasher.finalize()).eq_ignore_ascii_case(expected_checksum)
+        {
+            return Err("Downloaded file failed size or SHA-256 verification".to_owned());
+        }
+        Ok::<(), String>(())
+    }
+    .await;
+    drop(output);
+    if let Err(error) = result {
+        let _ = tokio::fs::remove_file(stage).await;
+        return Err(error);
     }
     Ok(())
 }
@@ -1248,7 +1330,7 @@ fn valid_checksum(checksum: &str) -> bool {
     checksum.len() == 64 && checksum.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut output = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
