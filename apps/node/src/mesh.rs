@@ -9,7 +9,7 @@ use libp2p::{
     noise, relay,
     request_response::{self, Message, ProtocolSupport},
     swarm::{behaviour::toggle::Toggle, NetworkBehaviour, StreamProtocol, SwarmEvent},
-    yamux, Multiaddr, PeerId, SwarmBuilder,
+    tcp, yamux, Multiaddr, PeerId, SwarmBuilder,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -801,6 +801,12 @@ async fn run_mesh_active(
     );
     let mut swarm = SwarmBuilder::with_existing_identity(keypair.clone())
         .with_tokio()
+        .with_tcp(
+            tcp::Config::default(),
+            noise::Config::new,
+            yamux::Config::default,
+        )
+        .map_err(|error| error.to_string())?
         .with_quic()
         .with_relay_client(noise::Config::new, yamux::Config::default)
         .map_err(|error| error.to_string())?
@@ -819,6 +825,13 @@ async fn run_mesh_active(
     swarm
         .listen_on(
             "/ip4/0.0.0.0/udp/0/quic-v1"
+                .parse()
+                .map_err(|error: libp2p::multiaddr::Error| error.to_string())?,
+        )
+        .map_err(|error| error.to_string())?;
+    swarm
+        .listen_on(
+            "/ip4/0.0.0.0/tcp/0"
                 .parse()
                 .map_err(|error: libp2p::multiaddr::Error| error.to_string())?,
         )

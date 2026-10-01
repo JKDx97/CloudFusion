@@ -18,7 +18,7 @@ cargo run --manifest-path apps/desktop/Cargo.toml
 The API must be running at `http://localhost:3000`. The desktop account should sign in through the app so the backend creates a device-bound session. The credential store and sync journal are kept under the operating system's per-application data directory; no private key or refresh token is written to the repository.
 # Internet P2P relay
 
-Desktop can optionally use a CloudFusion Circuit Relay v2 node alongside its LAN mesh. Configure `CLOUDFUSION_RELAY_MULTIADDR` in the Desktop process environment with the relay's public TCP address, ending in `/p2p/<relay-peer-id>`, then restart the app. Leave the variable unset to use LAN discovery only.
+Desktop can optionally use a CloudFusion Circuit Relay v2 node alongside its LAN mesh. Configure `CLOUDFUSION_RELAY_MULTIADDR` in the Desktop process environment with the relay's public TCP or QUIC address, ending in `/p2p/<relay-peer-id>`, then restart the app. The client listens for direct peer connections on both TCP and QUIC. Leave the variable unset to use LAN discovery only.
 
 See [the relay deployment guide](../relay/README.md) for the allowlist, resource limits, firewall ports and server setup. Relay transfers remain subject to the API-issued one-use ticket and the source device's live permission checks; the encrypted relay carries no stored file data.
 

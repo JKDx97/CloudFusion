@@ -9,7 +9,7 @@ use libp2p::{
     swarm::{
         behaviour::toggle::Toggle, ConnectionId, NetworkBehaviour, StreamProtocol, SwarmEvent,
     },
-    yamux, Multiaddr, PeerId, SwarmBuilder,
+    tcp, yamux, Multiaddr, PeerId, SwarmBuilder,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -404,6 +404,12 @@ async fn run_lan_mesh(
     );
     let mut swarm = SwarmBuilder::with_existing_identity(keypair.clone())
         .with_tokio()
+        .with_tcp(
+            tcp::Config::default(),
+            noise::Config::new,
+            yamux::Config::default,
+        )
+        .map_err(|error| error.to_string())?
         .with_quic()
         .with_relay_client(noise::Config::new, yamux::Config::default)
         .map_err(|error| error.to_string())?
@@ -424,6 +430,12 @@ async fn run_lan_mesh(
         .map_err(|error: libp2p::multiaddr::Error| error.to_string())?;
     swarm
         .listen_on(listen_address)
+        .map_err(|error| error.to_string())?;
+    let tcp_listen_address: Multiaddr = "/ip4/0.0.0.0/tcp/0"
+        .parse()
+        .map_err(|error: libp2p::multiaddr::Error| error.to_string())?;
+    swarm
+        .listen_on(tcp_listen_address)
         .map_err(|error| error.to_string())?;
     if let Some(address) = &relay_address {
         let _ = swarm.dial(address.clone());
