@@ -35,6 +35,7 @@ fn main() {
             mesh::start_lan_mesh,
             mesh::stop_lan_mesh,
             sync::get_sync_roots,
+            sync::get_sync_storage_usage,
             sync::set_sync_destination,
             sync::choose_sync_folder,
             sync::add_sync_root,

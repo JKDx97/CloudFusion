@@ -1,4 +1,7 @@
-use crate::{build_client, config_path, get_json, load_config, refresh_session, save_config};
+use crate::{
+    build_client, config_path, get_json, load_config, post_authorized_json, refresh_session,
+    save_config,
+};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use futures::StreamExt;
 use reqwest::{header, Client};
@@ -20,6 +23,7 @@ const MAX_SYNC_ROOTS: usize = 8;
 const MAX_SYNC_FILES: usize = 50_000;
 const MAX_SYNC_DEPTH: usize = 128;
 const MAX_MANIFEST_BYTES: u64 = 16 * 1024 * 1024;
+const STORAGE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -109,6 +113,19 @@ struct UploadedVersion {
 #[derive(Debug, Deserialize)]
 struct ApiEnvelope<T> {
     data: T,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceStorageConfiguration {
+    enabled: bool,
+    max_bytes: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StorageHeartbeat {
+    used_bytes: String,
 }
 
 struct RemoteFile {
@@ -283,10 +300,19 @@ pub(crate) async fn run_daemon() -> Result<(), String> {
     let (mesh_handle, mesh_commands) = crate::mesh::MeshHandle::channel();
     let mut mesh_task = tokio::spawn(crate::mesh::run_mesh(
         config.clone(),
-        credentials_rx,
+        credentials_rx.clone(),
         mesh_stop_rx,
         mesh_handle.clone(),
         mesh_commands,
+    ));
+    let (storage_stop_tx, storage_stop_rx) = watch::channel(false);
+    let mut storage_task = tokio::spawn(run_storage_heartbeat_worker(
+        client.clone(),
+        config.api_url.clone(),
+        device_id.clone(),
+        config.sync_roots.clone(),
+        credentials_rx.clone(),
+        storage_stop_rx,
     ));
     let mut ticker = tokio::time::interval(Duration::from_secs(30));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -296,15 +322,27 @@ pub(crate) async fn run_daemon() -> Result<(), String> {
         tokio::select! {
             _ = &mut shutdown => {
                 let _ = mesh_stop_tx.send(true);
+                let _ = storage_stop_tx.send(true);
                 let _ = (&mut mesh_task).await;
+                let _ = (&mut storage_task).await;
                 println!("CloudFusion NAS sync stopped.");
                 return Ok(());
             }
             result = &mut mesh_task => {
+                let _ = storage_stop_tx.send(true);
+                let _ = (&mut storage_task).await;
                 return match result {
                     Ok(Ok(())) => Ok(()),
                     Ok(Err(error)) => Err(format!("P2P device service stopped: {error}")),
                     Err(_) => Err("P2P device service failed unexpectedly".to_owned()),
+                };
+            }
+            result = &mut storage_task => {
+                let _ = mesh_stop_tx.send(true);
+                let _ = (&mut mesh_task).await;
+                return match result {
+                    Ok(()) => Err("Device storage heartbeat worker stopped unexpectedly".to_owned()),
+                    Err(_) => Err("Device storage heartbeat worker failed unexpectedly".to_owned()),
                 };
             }
             _ = ticker.tick() => {
@@ -330,6 +368,93 @@ pub(crate) async fn run_daemon() -> Result<(), String> {
             }
         }
     }
+}
+
+async fn run_storage_heartbeat_worker(
+    client: Client,
+    api_url: String,
+    device_id: String,
+    roots: Vec<NodeSyncRoot>,
+    mut credentials: watch::Receiver<crate::mesh::MeshCredentials>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    let mut ticker = tokio::time::interval(STORAGE_HEARTBEAT_INTERVAL);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {
+                if *shutdown.borrow() {
+                    return;
+                }
+                let current = credentials.borrow().clone();
+                match tokio::time::timeout(
+                    Duration::from_secs(15),
+                    report_storage_heartbeat(
+                        &client,
+                        &api_url,
+                        &device_id,
+                        &roots,
+                        &current.access_token,
+                    ),
+                ).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => eprintln!("CloudFusion device storage heartbeat failed: {error}"),
+                    Err(_) => eprintln!("CloudFusion device storage heartbeat timed out"),
+                }
+            }
+            changed = credentials.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+            }
+            changed = shutdown.changed() => {
+                if changed.is_err() || *shutdown.borrow() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+async fn report_storage_heartbeat(
+    client: &Client,
+    api_url: &str,
+    device_id: &str,
+    roots: &[NodeSyncRoot],
+    access_token: &str,
+) -> Result<(), String> {
+    let configuration: DeviceStorageConfiguration = get_json(
+        client,
+        api_url,
+        &format!("/devices/{device_id}/storage"),
+        access_token,
+    )
+    .await?;
+    if !configuration.enabled {
+        return Ok(());
+    }
+    let max_bytes = configuration
+        .max_bytes
+        .as_deref()
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| "enabled device storage has no valid capacity".to_owned())?;
+    let used_bytes = synchronized_local_storage_bytes(roots)?;
+    if used_bytes > max_bytes {
+        return Err(format!(
+            "CloudFusion sync files use {used_bytes} bytes, above this device's configured {max_bytes}-byte limit"
+        ));
+    }
+    let _: DeviceStorageConfiguration = post_authorized_json(
+        client,
+        api_url,
+        &format!("/devices/{device_id}/storage/heartbeat"),
+        access_token,
+        &StorageHeartbeat {
+            used_bytes: used_bytes.to_string(),
+        },
+    )
+    .await?;
+    Ok(())
 }
 
 async fn sync_cycle(
@@ -1428,6 +1553,49 @@ pub(crate) async fn verified_local_files(
     Ok(files)
 }
 
+fn synchronized_local_storage_bytes(roots: &[NodeSyncRoot]) -> Result<u64, String> {
+    let manifest = load_manifest()?;
+    storage_bytes_for_manifest(roots, &manifest)
+}
+
+fn storage_bytes_for_manifest(
+    roots: &[NodeSyncRoot],
+    manifest: &SyncManifest,
+) -> Result<u64, String> {
+    let mut total = 0u64;
+    for root in roots {
+        validate_root(root)?;
+        let root_path = PathBuf::from(&root.path);
+        let root_metadata = fs::symlink_metadata(&root_path)
+            .map_err(|_| "A configured CloudFusion sync folder is unavailable".to_owned())?;
+        if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+            return Err("A configured CloudFusion sync folder is not a safe directory".to_owned());
+        }
+        let Some(entries) = manifest.roots.get(&root.id) else {
+            continue;
+        };
+        for (relative, entry) in entries {
+            let path = match safe_target(&root.path, relative, false) {
+                Ok(path) => path,
+                Err(_) => continue,
+            };
+            let metadata = match fs::symlink_metadata(path) {
+                Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => {
+                    metadata
+                }
+                _ => continue,
+            };
+            if metadata.len() != entry.size {
+                continue;
+            }
+            total = total
+                .checked_add(metadata.len())
+                .ok_or_else(|| "CloudFusion-managed storage usage overflowed".to_owned())?;
+        }
+    }
+    Ok(total)
+}
+
 fn save_manifest(manifest: &SyncManifest) -> Result<(), String> {
     let path = manifest_path()?;
     let parent = path
@@ -1487,8 +1655,12 @@ fn validate_manifest_parent(parent: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{unique_conflict_path, validate_relative_path, SyncManifest, SyncedFile};
-    use std::collections::BTreeMap;
+    use super::{
+        storage_bytes_for_manifest, unique_conflict_path, validate_relative_path, NodeSyncRoot,
+        SyncManifest, SyncedFile,
+    };
+    use std::{collections::BTreeMap, fs};
+    use uuid::Uuid;
 
     #[test]
     fn sync_paths_reject_traversal_and_platform_special_names() {
@@ -1536,5 +1708,47 @@ mod tests {
         let bytes = serde_json::to_vec(&manifest).unwrap();
         let restored: SyncManifest = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(restored.roots["root"]["report.txt"].size, 12);
+    }
+
+    #[test]
+    fn storage_usage_counts_only_present_cloudfusion_managed_files_with_expected_sizes() {
+        let directory =
+            std::env::temp_dir().join(format!("cloudfusion-storage-{}", Uuid::new_v4()));
+        fs::create_dir(&directory).unwrap();
+        fs::write(directory.join("managed.txt"), b"managed").unwrap();
+        fs::write(directory.join("changed.txt"), b"changed size").unwrap();
+        fs::write(directory.join("untracked.txt"), b"not in the sync manifest").unwrap();
+
+        let root_id = Uuid::new_v4().to_string();
+        let root = NodeSyncRoot {
+            id: root_id.clone(),
+            path: directory.to_string_lossy().into_owned(),
+            remote_node_id: Uuid::new_v4().to_string(),
+        };
+        let file = |size| SyncedFile {
+            remote_path: "unused".to_owned(),
+            node_id: "node".to_owned(),
+            version_id: "version".to_owned(),
+            checksum: "a".repeat(64),
+            size,
+            version_number: 1,
+            local_modified_ns: None,
+        };
+        let manifest = SyncManifest {
+            roots: BTreeMap::from([(
+                root_id,
+                BTreeMap::from([
+                    ("managed.txt".to_owned(), file(7)),
+                    ("changed.txt".to_owned(), file(1)),
+                    ("missing.txt".to_owned(), file(20)),
+                    ("untracked.txt".to_owned(), file(25)),
+                ]),
+            )]),
+        };
+
+        let used = storage_bytes_for_manifest(&[root], &manifest).unwrap();
+
+        assert_eq!(used, 7);
+        fs::remove_dir_all(directory).unwrap();
     }
 }

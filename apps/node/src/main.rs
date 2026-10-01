@@ -384,7 +384,7 @@ async fn post_json<T: Serialize + ?Sized, R: for<'de> Deserialize<'de>>(
     parse_response(response).await
 }
 
-async fn post_authorized_json<T: Serialize + ?Sized, R: for<'de> Deserialize<'de>>(
+pub(crate) async fn post_authorized_json<T: Serialize + ?Sized, R: for<'de> Deserialize<'de>>(
     client: &Client,
     api_url: &str,
     path: &str,

@@ -35,6 +35,11 @@ interface AvailabilityLease {
   expiresAt: string;
 }
 
+interface DeviceStorageConfiguration {
+  enabled: boolean;
+  maxBytes: string | null;
+}
+
 interface SyncedNodeStatus {
   status: string;
   currentVersionId: string | null;
@@ -104,6 +109,7 @@ export class DesktopSyncBackgroundService {
   private lastUserId: string | null = null;
   private refreshInFlight?: Promise<void>;
   private remotePollTimer?: ReturnType<typeof setInterval>;
+  private storageHeartbeatTimer?: ReturnType<typeof setInterval>;
   private remotePollInFlight = false;
   private meshEnabled = false;
   private serveLocalFiles = false;
@@ -127,7 +133,9 @@ export class DesktopSyncBackgroundService {
     this.auth.currentUser$.subscribe((user) => {
       if (!user) {
         if (this.remotePollTimer) clearInterval(this.remotePollTimer);
+        if (this.storageHeartbeatTimer) clearInterval(this.storageHeartbeatTimer);
         this.remotePollTimer = undefined;
+        this.storageHeartbeatTimer = undefined;
         this.withdrawAllCopies(true);
         this.rootsState.set([]);
         this.lastUserId = null;
@@ -137,9 +145,14 @@ export class DesktopSyncBackgroundService {
       if (user.id === this.lastUserId) return;
       if (this.lastUserId && this.lastUserId !== user.id) this.withdrawAllCopies(true);
       if (this.remotePollTimer) clearInterval(this.remotePollTimer);
+      if (this.storageHeartbeatTimer) clearInterval(this.storageHeartbeatTimer);
       this.lastUserId = user.id;
-      void this.refresh().then(() => this.pollRemoteRoots());
+      void this.refresh().then(() => {
+        this.pollRemoteRoots();
+        void this.reportDeviceStorageHeartbeat();
+      });
       this.remotePollTimer = setInterval(() => void this.pollRemoteRoots(), 20_000);
+      this.storageHeartbeatTimer = setInterval(() => void this.reportDeviceStorageHeartbeat(), 60_000);
     });
   }
 
@@ -255,6 +268,25 @@ export class DesktopSyncBackgroundService {
     } catch {
       this.setPeerSharing(false, false);
       await this.invoke<void>('stop_lan_mesh').catch(() => undefined);
+    }
+  }
+
+  private async reportDeviceStorageHeartbeat(): Promise<void> {
+    const deviceId = this.auth.deviceId;
+    if (!this.isDesktop() || !deviceId || !this.lastUserId) return;
+    try {
+      const configuration = await firstValueFrom(this.http.get<ApiResponse<DeviceStorageConfiguration>>(
+        `${this.apiUrl}/devices/${deviceId}/storage`,
+      ));
+      if (!configuration.data.enabled || !configuration.data.maxBytes) return;
+      const usedBytes = await this.invoke<string>('get_sync_storage_usage');
+      if (BigInt(usedBytes) > BigInt(configuration.data.maxBytes)) return;
+      await firstValueFrom(this.http.post<ApiResponse<DeviceStorageConfiguration>>(
+        `${this.apiUrl}/devices/${deviceId}/storage/heartbeat`,
+        { usedBytes },
+      ));
+    } catch {
+      // A missed heartbeat expires naturally; file sync and P2P continue independently.
     }
   }
 

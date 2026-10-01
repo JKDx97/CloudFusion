@@ -21,3 +21,7 @@ The API must be running at `http://localhost:3000`. The desktop account should s
 Desktop can optionally use a CloudFusion Circuit Relay v2 node alongside its LAN mesh. Configure `CLOUDFUSION_RELAY_MULTIADDR` in the Desktop process environment with the relay's public TCP address, ending in `/p2p/<relay-peer-id>`, then restart the app. Leave the variable unset to use LAN discovery only.
 
 See [the relay deployment guide](../relay/README.md) for the allowlist, resource limits, firewall ports and server setup. Relay transfers remain subject to the API-issued one-use ticket and the source device's live permission checks; the encrypted relay carries no stored file data.
+
+## Device storage heartbeat
+
+When storage contribution is enabled for a device in **Settings → Devices**, the running Desktop client reports its aggregate CloudFusion sync-manifest bytes every minute. It counts only local files with a saved version checksum and expected size; only the total is sent to the API, never local paths. A missing sync root or usage above the configured capacity suppresses the heartbeat. Stale device heartbeats become `OFFLINE` after three minutes. This is presence/capacity reporting, not device replica allocation; keep the configured cloud replicas for durability.

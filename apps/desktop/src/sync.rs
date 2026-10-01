@@ -43,7 +43,7 @@ struct SyncedFileState {
     version_number: u64,
 }
 
-#[derive(Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SyncManifest {
     roots: HashMap<String, HashMap<String, SyncedFileState>>,
@@ -890,6 +890,44 @@ fn sync_file_matches(
         .unwrap_or(false)
 }
 
+fn storage_bytes_for_manifest(roots: &[SyncRoot], manifest: &SyncManifest) -> Result<u64, String> {
+    let mut total = 0u64;
+    for root in roots.iter().filter(|root| root.remote_node_id.is_some()) {
+        let root_metadata = fs::symlink_metadata(&root.path)
+            .map_err(|_| "A configured CloudFusion sync folder is unavailable".to_owned())?;
+        if root_metadata.file_type().is_symlink() || !root_metadata.is_dir() {
+            return Err("A configured CloudFusion sync folder is not a safe directory".to_owned());
+        }
+        let Some(entries) = manifest.roots.get(&root.id) else {
+            continue;
+        };
+        for (relative_path, entry) in entries {
+            if entry.checksum.is_none() {
+                continue;
+            }
+            let Some(expected_size) = entry.size_bytes else {
+                continue;
+            };
+            let Ok(path) = resolve_sync_file(&root.path, relative_path) else {
+                continue;
+            };
+            let Ok(metadata) = fs::symlink_metadata(path) else {
+                continue;
+            };
+            if metadata.file_type().is_symlink()
+                || !metadata.is_file()
+                || metadata.len() != expected_size
+            {
+                continue;
+            }
+            total = total
+                .checked_add(metadata.len())
+                .ok_or_else(|| "CloudFusion-managed storage usage overflowed".to_owned())?;
+        }
+    }
+    Ok(total)
+}
+
 fn collect_sync_files(
     root: &Path,
     directory: &Path,
@@ -1151,6 +1189,25 @@ pub fn get_sync_roots(state: State<'_, SyncState>) -> Result<Vec<SyncRoot>, Stri
         .lock()
         .map(|roots| roots.clone())
         .map_err(|_| "Sync root state is unavailable".to_owned())
+}
+
+#[tauri::command]
+pub async fn get_sync_storage_usage(state: State<'_, SyncState>) -> Result<String, String> {
+    let roots = state
+        .roots
+        .lock()
+        .map_err(|_| "Sync root state is unavailable".to_owned())?
+        .clone();
+    let manifest = state
+        .manifest
+        .lock()
+        .map_err(|_| "Sync manifest is unavailable".to_owned())?
+        .clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        storage_bytes_for_manifest(&roots, &manifest).map(|bytes| bytes.to_string())
+    })
+    .await
+    .map_err(|_| "Could not measure CloudFusion sync storage".to_owned())?
 }
 
 #[tauri::command]
@@ -1645,10 +1702,11 @@ pub async fn download_sync_version_from_cloud(
 mod tests {
     use super::{
         build_local_file_index, conflict_relative_path, load_recent_changes,
-        local_matches_manifest, sync_file_matches, validate_relative_path, SyncChange,
-        SyncManifest, SyncRoot, MAX_PENDING_CHANGES,
+        local_matches_manifest, storage_bytes_for_manifest, sync_file_matches,
+        validate_relative_path, SyncChange, SyncManifest, SyncRoot, SyncedFileState,
+        MAX_PENDING_CHANGES,
     };
-    use std::{fs, path::PathBuf};
+    use std::{collections::HashMap, fs, path::PathBuf};
     use uuid::Uuid;
 
     #[test]
@@ -1697,6 +1755,55 @@ mod tests {
 
         assert_eq!(index.len(), 1);
         fs::remove_dir_all(&root).expect("test root cleans up");
+    }
+
+    #[test]
+    fn storage_usage_counts_only_present_cloudfusion_files_at_their_manifest_size() {
+        let root_path =
+            std::env::temp_dir().join(format!("cloudfusion-storage-{}", Uuid::new_v4()));
+        fs::create_dir_all(&root_path).expect("test root creates");
+        fs::write(root_path.join("managed.txt"), b"abc").expect("managed file writes");
+        fs::write(root_path.join("changed.txt"), b"changed").expect("changed file writes");
+        fs::write(root_path.join("untracked.txt"), b"untracked").expect("untracked file writes");
+
+        let root_id = Uuid::new_v4().to_string();
+        let root = SyncRoot {
+            id: root_id.clone(),
+            path: root_path.to_string_lossy().into_owned(),
+            remote_node_id: Some(Uuid::new_v4().to_string()),
+        };
+        let file = |size_bytes| SyncedFileState {
+            remote_path: "unused".to_owned(),
+            version_id: "version".to_owned(),
+            checksum: Some("a".repeat(64)),
+            size_bytes: Some(size_bytes),
+            version_number: 1,
+        };
+        let manifest = SyncManifest {
+            roots: HashMap::from([(
+                root_id,
+                HashMap::from([
+                    ("managed.txt".to_owned(), file(3)),
+                    ("changed.txt".to_owned(), file(1)),
+                    ("missing.txt".to_owned(), file(20)),
+                    (
+                        "unverified.txt".to_owned(),
+                        SyncedFileState {
+                            remote_path: "unverified.txt".to_owned(),
+                            version_id: "version".to_owned(),
+                            checksum: None,
+                            size_bytes: Some(10),
+                            version_number: 0,
+                        },
+                    ),
+                ]),
+            )]),
+        };
+
+        let used = storage_bytes_for_manifest(&[root], &manifest).expect("storage usage measures");
+
+        assert_eq!(used, 3);
+        fs::remove_dir_all(&root_path).expect("test root cleans up");
     }
 
     #[test]
