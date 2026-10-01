@@ -54,6 +54,7 @@ function makeService() {
     create: jest.fn((value) => value),
     save: jest.fn(async (value) => value),
     find: jest.fn().mockResolvedValue([]),
+    update: jest.fn().mockResolvedValue({ affected: 1 }),
     delete: jest.fn().mockResolvedValue({ affected: 1 }),
   };
   const queryBuilder = {
@@ -125,6 +126,29 @@ describe('P2pService transfer coordination', () => {
     expect(result.expiresAt.getTime()).toBeGreaterThan(Date.now());
   });
 
+  it('restores an offline device copy to available when it is verified and re-advertised', async () => {
+    const ctx = makeService();
+    const offline = {
+      deviceId: 'source-device',
+      nodeId: 'node-id',
+      versionId: 'version-id',
+      status: 'OFFLINE',
+      expiresAt: new Date(Date.now() - 60_000),
+    };
+    ctx.availability.findOne.mockResolvedValue(offline);
+
+    await ctx.service.advertiseAvailability('source-user', 'source-device', {
+      nodeId: 'node-id', versionId: 'version-id', contentHash: checksum, sizeBytes: '17',
+    });
+
+    expect(ctx.availability.save).toHaveBeenCalledWith(expect.objectContaining({
+      ...offline,
+      status: 'AVAILABLE',
+      contentHash: checksum,
+      sizeBytes: '17',
+    }));
+  });
+
   it('advertises a bounded batch while validating each file against its exact readable version', async () => {
     const ctx = makeService();
     const item = { nodeId: 'node-id', versionId: 'version-id', contentHash: checksum, sizeBytes: '17' };
@@ -158,6 +182,32 @@ describe('P2pService transfer coordination', () => {
       nodeId: 'node-id', versionId: 'version-id', contentHash: checksum, sizeBytes: '17',
     })).rejects.toBeInstanceOf(ForbiddenException);
     expect(ctx.availability.save).not.toHaveBeenCalled();
+  });
+
+  it('marks expired device copies offline instead of treating them as missing', async () => {
+    const ctx = makeService();
+
+    const result = await ctx.service.listAvailability('source-user', 'node-id', 'version-id');
+
+    expect(result).toEqual([]);
+    expect(ctx.availability.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        nodeId: 'node-id',
+        versionId: 'version-id',
+        status: 'AVAILABLE',
+        expiresAt: expect.objectContaining({ _type: 'lessThan' }),
+      }),
+      { status: 'OFFLINE' },
+    );
+    expect(ctx.availability.delete).toHaveBeenCalledWith(expect.objectContaining({
+      nodeId: 'node-id',
+      versionId: 'version-id',
+      status: expect.objectContaining({ _type: 'in' }),
+      expiresAt: expect.objectContaining({ _type: 'lessThan' }),
+    }));
+    expect(ctx.availability.find).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ status: 'AVAILABLE' }),
+    }));
   });
 
   it('issues a short-lived ticket for a cross-user peer only when both users can read the exact version', async () => {

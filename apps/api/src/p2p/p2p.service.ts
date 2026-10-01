@@ -34,6 +34,7 @@ const ACTIVE_TRANSFER_STATUSES = [
   PeerTransferStatus.TRANSFERRING,
   PeerTransferStatus.VERIFYING,
 ];
+const AVAILABILITY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 
 interface PeerTransferTicketClaims {
   sub: string;
@@ -157,7 +158,16 @@ export class P2pService {
   async listAvailability(userId: string, nodeId: string, versionId: string) {
     const { node, version } = await this.requireReadableVersion(userId, nodeId, versionId);
     const now = new Date();
-    await this.availability.delete({ nodeId, versionId, expiresAt: LessThan(now) });
+    await this.availability.update(
+      { nodeId, versionId, status: DeviceFileAvailabilityStatus.AVAILABLE, expiresAt: LessThan(now) },
+      { status: DeviceFileAvailabilityStatus.OFFLINE },
+    );
+    await this.availability.delete({
+      nodeId,
+      versionId,
+      status: In([DeviceFileAvailabilityStatus.OFFLINE, DeviceFileAvailabilityStatus.CORRUPTED]),
+      expiresAt: LessThan(new Date(now.getTime() - AVAILABILITY_RETENTION_MS)),
+    });
     const rows = await this.availability.find({
       where: {
         nodeId,
