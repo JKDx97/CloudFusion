@@ -25,10 +25,18 @@ export class S3CloudProviderAdapter implements CloudProviderAdapter {
     if (!targets.length) throw new ProviderException(ProviderErrorCode.PROVIDER_TARGET_NOT_FOUND, 404);
   }
 
-  getAuthorizationUrl(_state: string): string { throw unsupported(); }
-  async exchangeAuthorizationCode(_code: string): Promise<{ account: CloudAccountInfo; tokens: ProviderTokenSet }> { throw unsupported(); }
-  async refreshAccessToken(_refreshToken: string): Promise<ProviderTokenSet> { throw unsupported(); }
-  async revokeAuthorization(_refreshToken: string): Promise<void> { throw unsupported(); }
+  getAuthorizationUrl(_state: string): string {
+    throw unsupported();
+  }
+  async exchangeAuthorizationCode(_code: string): Promise<{ account: CloudAccountInfo; tokens: ProviderTokenSet }> {
+    throw unsupported();
+  }
+  async refreshAccessToken(_refreshToken: string): Promise<ProviderTokenSet> {
+    throw unsupported();
+  }
+  async revokeAuthorization(_refreshToken: string): Promise<void> {
+    throw unsupported();
+  }
 
   async listFiles(_accessToken: string, accountId: string, parentId?: string): Promise<CloudFile[]> {
     this.assertAccount(accountId);
@@ -41,7 +49,9 @@ export class S3CloudProviderAdapter implements CloudProviderAdapter {
     return this.targets.map((target) => this.targetRoot(target));
   }
 
-  async searchFiles(): Promise<CloudFile[]> { throw unsupported(); }
+  async searchFiles(): Promise<CloudFile[]> {
+    throw unsupported();
+  }
 
   async getFile(_accessToken: string, accountId: string, fileId: string): Promise<CloudFile> {
     this.assertAccount(accountId);
@@ -57,7 +67,10 @@ export class S3CloudProviderAdapter implements CloudProviderAdapter {
         } catch (error) {
           if (!isNotFound(error)) throw error;
         }
-        const page = await adapter.listObjects({ prefix: folderKey, maxKeys: 1 });
+        const page = await adapter.listObjects({
+          prefix: folderKey,
+          maxKeys: 1,
+        });
         if (!page.objects.length) throw new ProviderException(ProviderErrorCode.PROVIDER_OBJECT_NOT_FOUND, 404);
         return this.folder(target, parsed.key, parentKey(parsed.key));
       }
@@ -124,7 +137,11 @@ export class S3CloudProviderAdapter implements CloudProviderAdapter {
     const { target, key: parentKey } = this.parentForWrite(parentId);
     const folderKey = `${joinKey(parentKey, name)}/`;
     return this.withTarget(target, async (adapter) => {
-      await adapter.putObject(folderKey, { body: Buffer.alloc(0), contentLength: 0, contentType: 'application/x-directory' });
+      await adapter.putObject(folderKey, {
+        body: Buffer.alloc(0),
+        contentLength: 0,
+        contentType: 'application/x-directory',
+      });
       return this.folder(target, folderKey.slice(0, -1));
     });
   }
@@ -170,7 +187,10 @@ export class S3CloudProviderAdapter implements CloudProviderAdapter {
       const directoryPrefix = `${parsed.key.replace(/\/$/, '')}/`;
       let remaining: number;
       do {
-        const page = await adapter.listObjects({ prefix: directoryPrefix, maxKeys: LIST_PAGE_SIZE });
+        const page = await adapter.listObjects({
+          prefix: directoryPrefix,
+          maxKeys: LIST_PAGE_SIZE,
+        });
         remaining = page.objects.length;
         for (const object of page.objects) await adapter.deleteObject(object.key);
       } while (remaining === LIST_PAGE_SIZE);
@@ -178,14 +198,21 @@ export class S3CloudProviderAdapter implements CloudProviderAdapter {
     });
   }
 
-  async getStorageQuota(): Promise<CloudQuota> { throw unsupported(); }
+  async getStorageQuota(): Promise<CloudQuota> {
+    throw unsupported();
+  }
 
   private async listChildren(adapter: S3CompatibleProviderAdapter, target: StorageTarget, parentKey: string): Promise<CloudFile[]> {
     const prefix = parentKey ? `${parentKey.replace(/\/$/, '')}/` : '';
     const files = new Map<string, CloudFile>();
     let continuationToken: string | undefined;
     do {
-      const page = await adapter.listObjects({ ...(prefix ? { prefix } : {}), delimiter: '/', continuationToken, maxKeys: LIST_PAGE_SIZE });
+      const page = await adapter.listObjects({
+        ...(prefix ? { prefix } : {}),
+        delimiter: '/',
+        continuationToken,
+        maxKeys: LIST_PAGE_SIZE,
+      });
       for (const folderPrefix of page.commonPrefixes ?? []) {
         const folderKey = folderPrefix.replace(/\/$/, '');
         if (folderKey && folderKey !== parentKey) files.set(folderKey, this.folder(target, folderKey, parentKey));
@@ -206,7 +233,16 @@ export class S3CloudProviderAdapter implements CloudProviderAdapter {
     return [...files.values()];
   }
 
-  private objectFile(target: StorageTarget, metadata: { key: string; size?: number; contentType?: string; lastModified?: Date }, parent?: string): CloudFile {
+  private objectFile(
+    target: StorageTarget,
+    metadata: {
+      key: string;
+      size?: number;
+      contentType?: string;
+      lastModified?: Date;
+    },
+    parent?: string,
+  ): CloudFile {
     const key = metadata.key.replace(/\/$/, '');
     const segments = key.split('/');
     return {
@@ -240,18 +276,28 @@ export class S3CloudProviderAdapter implements CloudProviderAdapter {
     return { ...root, name: target.name };
   }
 
-  private parentForWrite(parentId?: string): { target: StorageTarget; key: string } {
+  private parentForWrite(parentId?: string): {
+    target: StorageTarget;
+    key: string;
+  } {
     if (!parentId) return { target: this.targets[0], key: '' };
     const parsed = this.parseId(parentId);
     if (parsed.kind !== 'folder') throw new ProviderException(ProviderErrorCode.PROVIDER_OBJECT_NOT_FOUND, 404);
-    return { target: this.requireTarget(parsed.targetId), key: parsed.key.replace(/\/$/, '') };
+    return {
+      target: this.requireTarget(parsed.targetId),
+      key: parsed.key.replace(/\/$/, ''),
+    };
   }
 
   private encodeId(targetId: string, key: string, kind: 'file' | 'folder'): string {
     return `${FILE_ID_PREFIX}${targetId}:${kind}:${Buffer.from(key, 'utf8').toString('base64url')}`;
   }
 
-  private parseId(value: string): { targetId: string; key: string; kind: 'file' | 'folder' } {
+  private parseId(value: string): {
+    targetId: string;
+    key: string;
+    kind: 'file' | 'folder';
+  } {
     if (!value.startsWith(FILE_ID_PREFIX)) throw new ProviderException(ProviderErrorCode.PROVIDER_OBJECT_NOT_FOUND, 404);
     const split = value.indexOf(':', FILE_ID_PREFIX.length);
     if (split < 0) throw new ProviderException(ProviderErrorCode.PROVIDER_OBJECT_NOT_FOUND, 404);
@@ -280,11 +326,17 @@ export class S3CloudProviderAdapter implements CloudProviderAdapter {
 
   private async withTarget<T>(target: StorageTarget, operation: (adapter: S3CompatibleProviderAdapter) => Promise<T>): Promise<T> {
     const adapter = await this.openTarget(target);
-    try { return await operation(adapter); }
-    finally { adapter.close(); }
+    try {
+      return await operation(adapter);
+    } finally {
+      adapter.close();
+    }
   }
 
   private openTarget(target: StorageTarget): Promise<S3CompatibleProviderAdapter> {
+    if (target.type === 'DEVICE' || !target.remoteIdentifier) {
+      throw new ProviderException(ProviderErrorCode.PROVIDER_TARGET_NOT_FOUND, 404);
+    }
     const config: ObjectStorageTargetConfig = {
       providerId: providerId(this.provider),
       bucket: target.remoteIdentifier,
@@ -319,9 +371,14 @@ function joinKey(parent: string, name: string): string {
 function isNotFound(error: unknown): boolean {
   if (error instanceof ProviderException) return error.getStatus() === 404;
   if (typeof error !== 'object' || error === null) return false;
-  const value = error as { status?: unknown; statusCode?: unknown; response?: unknown };
-  return value.status === 404 || value.statusCode === 404 ||
-    typeof value.response === 'object' && value.response !== null && 'code' in value.response && value.response.code === ProviderErrorCode.PROVIDER_OBJECT_NOT_FOUND;
+  const value = error as {
+    status?: unknown;
+    statusCode?: unknown;
+    response?: unknown;
+  };
+  return (
+    value.status === 404 || value.statusCode === 404 || (typeof value.response === 'object' && value.response !== null && 'code' in value.response && value.response.code === ProviderErrorCode.PROVIDER_OBJECT_NOT_FOUND)
+  );
 }
 
 function unsupported(): ProviderException {

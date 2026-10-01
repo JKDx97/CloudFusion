@@ -26,9 +26,4 @@ export class UpdateDeviceSettingsDto {
   @IsOptional()
   @IsBoolean()
   serveLocalFiles?: boolean;
-
-  @ApiPropertyOptional({ default: false })
-  @IsOptional()
-  @IsBoolean()
-  storageContributionEnabled?: boolean;
 }

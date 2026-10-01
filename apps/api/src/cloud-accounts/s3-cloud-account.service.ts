@@ -179,6 +179,9 @@ export class S3CloudAccountService {
   }
 
   private toPublicTarget(target: StorageTarget): StorageTargetPublic {
+    if (target.type === 'DEVICE' || !target.cloudAccountId || !target.remoteIdentifier) {
+      throw new BadRequestException('A cloud storage target is required');
+    }
     return {
       id: target.id,
       cloudAccountId: target.cloudAccountId,
@@ -208,6 +211,9 @@ export class S3CloudAccountService {
   }
 
   private targetToConfig(provider: CloudProvider, target: StorageTarget): ObjectStorageTargetConfig {
+    if (target.type === 'DEVICE' || !target.remoteIdentifier) {
+      throw new BadRequestException('A cloud storage target is required');
+    }
     return {
       providerId: providerId(provider),
       bucket: target.remoteIdentifier,
