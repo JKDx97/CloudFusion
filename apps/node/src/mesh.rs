@@ -1378,10 +1378,205 @@ fn relay_peer_address(relay: &Multiaddr, peer_id: &PeerId) -> Option<Multiaddr> 
 mod tests {
     use super::{
         can_join_mesh, can_serve, relay_peer_address, valid_resume_offset, validate_chunk_response,
-        ChunkResponse, DeviceSettings, MAX_CHUNK_BYTES,
+        ChunkRequest, ChunkResponse, DeviceSettings, MAX_CHUNK_BYTES,
     };
-    use libp2p::{Multiaddr, PeerId};
-    use std::str::FromStr;
+    use futures::StreamExt;
+    use libp2p::{
+        multiaddr::Protocol,
+        noise,
+        request_response::{self, Message, ProtocolSupport},
+        swarm::{StreamProtocol, SwarmEvent},
+        tcp, yamux, Multiaddr, PeerId, SwarmBuilder,
+    };
+    use std::{str::FromStr, time::Duration};
+
+    fn test_transfer_behaviour() -> request_response::cbor::Behaviour<ChunkRequest, ChunkResponse> {
+        request_response::cbor::Behaviour::new(
+            [(
+                StreamProtocol::new(super::TRANSFER_PROTOCOL),
+                ProtocolSupport::Full,
+            )],
+            request_response::Config::default(),
+        )
+    }
+
+    fn test_swarm() -> libp2p::Swarm<request_response::cbor::Behaviour<ChunkRequest, ChunkResponse>>
+    {
+        SwarmBuilder::with_new_identity()
+            .with_tokio()
+            .with_tcp(
+                tcp::Config::default(),
+                noise::Config::new,
+                yamux::Config::default,
+            )
+            .expect("TCP transport builds")
+            .with_quic()
+            .with_behaviour(|_| test_transfer_behaviour())
+            .expect("request-response behaviour builds")
+            .build()
+    }
+
+    fn is_quic_address(address: &Multiaddr) -> bool {
+        address
+            .iter()
+            .any(|protocol| matches!(protocol, Protocol::QuicV1))
+    }
+
+    fn is_tcp_address(address: &Multiaddr) -> bool {
+        address
+            .iter()
+            .any(|protocol| matches!(protocol, Protocol::Tcp(_)))
+    }
+
+    async fn transfer_over_direct_transport(use_quic: bool) {
+        let mut source = test_swarm();
+        let mut destination = test_swarm();
+        let source_peer_id = source.local_peer_id().to_owned();
+        let listen_addresses = ["/ip4/127.0.0.1/tcp/0", "/ip4/127.0.0.1/udp/0/quic-v1"];
+        for address in listen_addresses {
+            source
+                .listen_on(address.parse().expect("valid source address"))
+                .expect("source listener starts");
+            destination
+                .listen_on(address.parse().expect("valid destination address"))
+                .expect("destination listener starts");
+        }
+
+        let mut source_tcp_ready = false;
+        let mut source_quic_ready = false;
+        let mut destination_tcp_ready = false;
+        let mut destination_quic_ready = false;
+        let mut target_address = None;
+        let mut dial_started = false;
+        let mut direct_connection_established = false;
+        let mut transfer_completed = false;
+
+        while !transfer_completed {
+            let (from_source, event) = tokio::select! {
+                event = source.select_next_some() => (true, event),
+                event = destination.select_next_some() => (false, event),
+            };
+
+            match (from_source, event) {
+                (true, SwarmEvent::NewListenAddr { address, .. }) => {
+                    source_tcp_ready |= is_tcp_address(&address);
+                    source_quic_ready |= is_quic_address(&address);
+                    if if use_quic {
+                        is_quic_address(&address)
+                    } else {
+                        is_tcp_address(&address)
+                    } {
+                        target_address = Some(address);
+                    }
+                }
+                (false, SwarmEvent::NewListenAddr { address, .. }) => {
+                    destination_tcp_ready |= is_tcp_address(&address);
+                    destination_quic_ready |= is_quic_address(&address);
+                }
+                (
+                    false,
+                    SwarmEvent::ConnectionEstablished {
+                        peer_id, endpoint, ..
+                    },
+                ) if peer_id == source_peer_id => {
+                    let remote_address = endpoint.get_remote_address();
+                    direct_connection_established = !endpoint.is_relayed()
+                        && if use_quic {
+                            is_quic_address(remote_address)
+                        } else {
+                            is_tcp_address(remote_address)
+                        };
+                    destination.behaviour_mut().send_request(
+                        &source_peer_id,
+                        ChunkRequest {
+                            transfer_id: "loopback-transport-test".to_owned(),
+                            ticket: Some("one-use-test-ticket".to_owned()),
+                            content_hash: "ab".repeat(32),
+                            total_bytes: 7,
+                            offset: 0,
+                            max_bytes: 256 * 1024,
+                        },
+                    );
+                }
+                (
+                    true,
+                    SwarmEvent::Behaviour(request_response::Event::Message {
+                        message:
+                            Message::Request {
+                                request, channel, ..
+                            },
+                        ..
+                    }),
+                ) => {
+                    assert_eq!(request.transfer_id, "loopback-transport-test");
+                    source
+                        .behaviour_mut()
+                        .send_response(
+                            channel,
+                            ChunkResponse {
+                                transfer_id: request.transfer_id,
+                                content_hash: request.content_hash,
+                                total_bytes: request.total_bytes,
+                                offset: request.offset,
+                                bytes: b"p2p-ok!".to_vec(),
+                                finished: true,
+                                error: None,
+                            },
+                        )
+                        .expect("source sends the test response");
+                }
+                (
+                    false,
+                    SwarmEvent::Behaviour(request_response::Event::Message {
+                        message: Message::Response { response, .. },
+                        ..
+                    }),
+                ) => {
+                    assert!(direct_connection_established);
+                    assert_eq!(response.bytes, b"p2p-ok!");
+                    assert!(response.finished);
+                    transfer_completed = true;
+                }
+                (
+                    _,
+                    SwarmEvent::Behaviour(request_response::Event::OutboundFailure {
+                        error, ..
+                    }),
+                ) => {
+                    panic!("direct peer request failed: {error}");
+                }
+                _ => {}
+            }
+
+            if !dial_started
+                && source_tcp_ready
+                && source_quic_ready
+                && destination_tcp_ready
+                && destination_quic_ready
+            {
+                let mut address = target_address
+                    .take()
+                    .expect("the requested source transport is listening");
+                if !matches!(address.iter().last(), Some(Protocol::P2p(_))) {
+                    address.push(Protocol::P2p(source_peer_id));
+                }
+                destination.dial(address).expect("destination dials source");
+                dial_started = true;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn peers_exchange_chunk_responses_over_tcp_and_quic() {
+        for use_quic in [false, true] {
+            tokio::time::timeout(
+                Duration::from_secs(15),
+                transfer_over_direct_transport(use_quic),
+            )
+            .await
+            .expect("direct P2P transfer completes within the timeout");
+        }
+    }
 
     #[test]
     fn sharing_requires_explicit_peer_and_file_serving_opt_in() {
