@@ -139,6 +139,36 @@ struct DeviceStorageConfiguration {
     max_bytes: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeviceStorageReplicaAssignment {
+    assignment_id: String,
+    node_id: String,
+    version_id: String,
+    content_hash: String,
+    size_bytes: String,
+    #[allow(dead_code)]
+    attempts: u32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CompleteDeviceStorageReplica<'a> {
+    content_hash: &'a str,
+    size_bytes: &'a str,
+}
+
+#[derive(Deserialize)]
+struct NextDeviceStorageReplica {
+    assignment: Option<DeviceStorageReplicaAssignment>,
+}
+
+#[derive(Deserialize)]
+struct DeviceStorageReplicaReceipt {
+    assignment_id: String,
+    status: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StorageHeartbeat {
@@ -470,6 +500,7 @@ pub(crate) async fn run_daemon() -> Result<(), String> {
                     token,
                     &device_id,
                     &config.sync_roots,
+                    config.storage_root.as_deref(),
                     &mesh_handle,
                 ).await;
             }
@@ -572,6 +603,7 @@ async fn sync_cycle(
     token: &str,
     device_id: &str,
     roots: &[NodeSyncRoot],
+    storage_root: Option<&str>,
     mesh: &crate::mesh::MeshHandle,
 ) {
     for root in roots {
@@ -583,6 +615,217 @@ async fn sync_cycle(
             Err(error) => eprintln!("Sync folder {} failed: {error}", root.path),
         }
     }
+    if let Some(storage_root) = storage_root {
+        if let Err(error) =
+            process_next_device_storage_replica(client, api_url, token, device_id, storage_root)
+                .await
+        {
+            eprintln!("CloudFusion NAS replica storage failed: {error}");
+        }
+    }
+}
+
+async fn process_next_device_storage_replica(
+    client: &Client,
+    api_url: &str,
+    token: &str,
+    device_id: &str,
+    storage_root: &str,
+) -> Result<(), String> {
+    let configuration: DeviceStorageConfiguration = get_json(
+        client,
+        api_url,
+        &format!("/devices/{device_id}/storage"),
+        token,
+    )
+    .await?;
+    if !configuration.enabled {
+        return Ok(());
+    }
+    let max_bytes = configuration
+        .max_bytes
+        .as_deref()
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| "enabled device storage has no valid capacity".to_owned())?;
+    let next: NextDeviceStorageReplica =
+        post_authorized_json(client, api_url, "/p2p/storage/replicas/next", token, &()).await?;
+    let Some(assignment) = next.assignment else {
+        return Ok(());
+    };
+    let size_bytes = assignment.size_bytes.clone();
+    let content_hash = assignment.content_hash.clone();
+    receive_device_storage_replica(client, api_url, token, storage_root, &assignment, max_bytes)
+        .await?;
+    let receipt: DeviceStorageReplicaReceipt = post_authorized_json(
+        client,
+        api_url,
+        &format!(
+            "/p2p/storage/replicas/{}/complete",
+            assignment.assignment_id
+        ),
+        token,
+        &CompleteDeviceStorageReplica {
+            content_hash: &content_hash,
+            size_bytes: &size_bytes,
+        },
+    )
+    .await?;
+    if receipt.assignment_id != assignment.assignment_id || receipt.status != "AVAILABLE" {
+        return Err("CloudFusion did not confirm the stored device replica".to_owned());
+    }
+    println!(
+        "Stored and verified a CloudFusion device replica ({} bytes).",
+        size_bytes
+    );
+    Ok(())
+}
+
+async fn receive_device_storage_replica(
+    client: &Client,
+    api_url: &str,
+    token: &str,
+    storage_root: &str,
+    assignment: &DeviceStorageReplicaAssignment,
+    max_bytes: u64,
+) -> Result<(), String> {
+    Uuid::parse_str(&assignment.assignment_id)
+        .map_err(|_| "CloudFusion returned an invalid replica assignment ID".to_owned())?;
+    Uuid::parse_str(&assignment.node_id)
+        .map_err(|_| "CloudFusion returned an invalid replica file ID".to_owned())?;
+    Uuid::parse_str(&assignment.version_id)
+        .map_err(|_| "CloudFusion returned an invalid replica version ID".to_owned())?;
+    if !valid_checksum(&assignment.content_hash) {
+        return Err("CloudFusion returned an invalid replica SHA-256".to_owned());
+    }
+    let size_bytes = assignment
+        .size_bytes
+        .parse::<u64>()
+        .map_err(|_| "CloudFusion returned an invalid replica size".to_owned())?;
+    let replica_dir = prepare_replica_directory(Path::new(storage_root))?;
+    let file_name = format!("{}-{}.blob", assignment.node_id, assignment.version_id);
+    let final_path = replica_dir.join(&file_name);
+    let manifest_path = replica_dir.join("manifest.json");
+    let mut manifest = load_device_replica_manifest(&manifest_path)?;
+
+    if let Ok(metadata) = fs::symlink_metadata(&final_path) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("Managed device replica destination is not a safe file".to_owned());
+        }
+        if metadata.len() == size_bytes {
+            let (actual_size, actual_hash) = hash_file(&final_path).await?;
+            if actual_size == size_bytes
+                && actual_hash.eq_ignore_ascii_case(&assignment.content_hash)
+            {
+                upsert_device_replica_entry(&mut manifest, assignment, size_bytes, &file_name);
+                save_device_replica_manifest(&manifest_path, &manifest)?;
+                return Ok(());
+            }
+        }
+        fs::remove_file(&final_path)
+            .map_err(|_| "Could not replace the corrupted managed device replica".to_owned())?;
+        manifest.entries.retain(|entry| {
+            entry.node_id != assignment.node_id || entry.version_id != assignment.version_id
+        });
+        save_device_replica_manifest(&manifest_path, &manifest)?;
+    }
+    let used_bytes = dedicated_storage_bytes(storage_root)?;
+    if used_bytes
+        .checked_add(size_bytes)
+        .is_none_or(|total| total > max_bytes)
+    {
+        return Err("Configured NAS storage capacity is insufficient for this replica".to_owned());
+    }
+
+    let stage = replica_dir.join(format!(".{}.part", assignment.assignment_id));
+    match fs::symlink_metadata(&stage) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err("Temporary device replica path is not a safe file".to_owned())
+        }
+        Ok(_) => fs::remove_file(&stage)
+            .map_err(|_| "Could not replace a previous temporary device replica".to_owned())?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => return Err("Could not inspect temporary device replica path".to_owned()),
+    }
+    let endpoint = format!(
+        "{}/virtual-drive/nodes/{}/versions/{}/download",
+        api_url.trim_end_matches('/'),
+        assignment.node_id,
+        assignment.version_id
+    );
+    let response = client
+        .get(endpoint)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|_| "Could not connect to CloudFusion for the NAS replica download".to_owned())?;
+    if !response.status().is_success() {
+        return Err(format!(
+            "CloudFusion rejected the NAS replica download (HTTP {})",
+            response.status()
+        ));
+    }
+    if response
+        .content_length()
+        .is_some_and(|length| length != size_bytes)
+    {
+        return Err("CloudFusion announced an unexpected NAS replica size".to_owned());
+    }
+    let result = async {
+        let mut output = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&stage)
+            .await
+            .map_err(|_| "Could not create the temporary NAS replica file".to_owned())?;
+        let mut stream = response.bytes_stream();
+        let mut hasher = Sha256::new();
+        let mut received = 0u64;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|_| "NAS replica download was interrupted".to_owned())?;
+            received = received
+                .checked_add(chunk.len() as u64)
+                .ok_or_else(|| "NAS replica size overflowed".to_owned())?;
+            if received > size_bytes {
+                return Err(
+                    "CloudFusion sent more bytes than the assigned NAS replica size".to_owned(),
+                );
+            }
+            hasher.update(&chunk);
+            output
+                .write_all(&chunk)
+                .await
+                .map_err(|_| "Could not write the downloaded NAS replica".to_owned())?;
+        }
+        output
+            .flush()
+            .await
+            .map_err(|_| "Could not finish writing the NAS replica".to_owned())?;
+        output
+            .sync_data()
+            .await
+            .map_err(|_| "Could not persist the NAS replica".to_owned())?;
+        drop(output);
+        if received != size_bytes
+            || !hex(&hasher.finalize()).eq_ignore_ascii_case(&assignment.content_hash)
+        {
+            return Err("NAS replica failed exact size or SHA-256 verification".to_owned());
+        }
+        Ok::<(), String>(())
+    }
+    .await;
+    if let Err(error) = result {
+        let _ = tokio::fs::remove_file(&stage).await;
+        return Err(error);
+    }
+    if let Err(error) = fs::rename(&stage, &final_path) {
+        let _ = fs::remove_file(&stage);
+        return Err(format!(
+            "Could not atomically install the verified NAS replica: {error}"
+        ));
+    }
+    upsert_device_replica_entry(&mut manifest, assignment, size_bytes, &file_name);
+    save_device_replica_manifest(&manifest_path, &manifest)?;
+    Ok(())
 }
 
 fn unix_time_seconds() -> u64 {
@@ -1614,6 +1857,7 @@ fn load_manifest() -> Result<SyncManifest, String> {
 
 pub(crate) async fn verified_local_files(
     roots: &[NodeSyncRoot],
+    storage_root: Option<&str>,
 ) -> Result<Vec<P2pLocalFile>, String> {
     let manifest = load_manifest()?;
     let mut files = Vec::new();
@@ -1659,6 +1903,48 @@ pub(crate) async fn verified_local_files(
             }
         }
     }
+    if let Some(storage_root) = storage_root {
+        let replica_dir = match prepare_replica_directory(Path::new(storage_root)) {
+            Ok(path) => path,
+            Err(_) => return Ok(files),
+        };
+        let manifest_path = replica_dir.join("manifest.json");
+        let replicas = match load_device_replica_manifest(&manifest_path) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                eprintln!("Could not verify the NAS replica manifest: {error}");
+                return Ok(files);
+            }
+        };
+        for entry in replicas.entries {
+            if !valid_device_replica_entry(&entry) {
+                continue;
+            }
+            let path = replica_dir.join(&entry.relative_path);
+            let metadata = match fs::symlink_metadata(&path) {
+                Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => {
+                    metadata
+                }
+                _ => continue,
+            };
+            if metadata.len() != entry.size_bytes {
+                continue;
+            }
+            let (size, checksum) = match hash_file(&path).await {
+                Ok(value) => value,
+                Err(_) => continue,
+            };
+            if size == entry.size_bytes && checksum.eq_ignore_ascii_case(&entry.checksum) {
+                files.push(P2pLocalFile {
+                    node_id: entry.node_id,
+                    version_id: entry.version_id,
+                    checksum,
+                    size,
+                    path,
+                });
+            }
+        }
+    }
     Ok(files)
 }
 
@@ -1673,6 +1959,111 @@ fn prepare_replica_directory(root: &Path) -> Result<PathBuf, String> {
     let replica_dir = metadata_dir.join("replicas");
     ensure_safe_storage_directory(&replica_dir)?;
     Ok(replica_dir)
+}
+
+fn load_device_replica_manifest(path: &Path) -> Result<DeviceReplicaManifest, String> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) if !metadata.file_type().is_symlink() && metadata.is_file() => metadata,
+        Ok(_) => return Err("Device replica manifest is not a safe regular file".to_owned()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(DeviceReplicaManifest::default())
+        }
+        Err(_) => return Err("Could not inspect the device replica manifest".to_owned()),
+    };
+    if metadata.len() > MAX_MANIFEST_BYTES {
+        return Err("Device replica manifest exceeds the safe size limit".to_owned());
+    }
+    serde_json::from_slice(
+        &fs::read(path).map_err(|_| "Could not read the device replica manifest".to_owned())?,
+    )
+    .map_err(|_| "Device replica manifest is invalid".to_owned())
+}
+
+fn valid_device_replica_entry(entry: &DeviceReplicaEntry) -> bool {
+    !entry.relative_path.is_empty()
+        && !Path::new(&entry.relative_path).is_absolute()
+        && !entry
+            .relative_path
+            .chars()
+            .any(|character| matches!(character, '/' | '\\' | ':'))
+        && entry.relative_path != "."
+        && entry.relative_path != ".."
+        && Uuid::parse_str(&entry.node_id).is_ok()
+        && Uuid::parse_str(&entry.version_id).is_ok()
+        && valid_checksum(&entry.checksum)
+}
+
+fn upsert_device_replica_entry(
+    manifest: &mut DeviceReplicaManifest,
+    assignment: &DeviceStorageReplicaAssignment,
+    size_bytes: u64,
+    relative_path: &str,
+) {
+    manifest.entries.retain(|entry| {
+        entry.node_id != assignment.node_id || entry.version_id != assignment.version_id
+    });
+    manifest.entries.push(DeviceReplicaEntry {
+        node_id: assignment.node_id.clone(),
+        version_id: assignment.version_id.clone(),
+        relative_path: relative_path.to_owned(),
+        checksum: assignment.content_hash.to_ascii_lowercase(),
+        size_bytes,
+    });
+}
+
+fn save_device_replica_manifest(
+    path: &Path,
+    manifest: &DeviceReplicaManifest,
+) -> Result<(), String> {
+    let bytes = serde_json::to_vec(manifest)
+        .map_err(|_| "Could not encode the device replica manifest".to_owned())?;
+    if bytes.len() as u64 > MAX_MANIFEST_BYTES {
+        return Err("Device replica manifest exceeds the safe size limit".to_owned());
+    }
+    if let Ok(metadata) = fs::symlink_metadata(path) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err("Device replica manifest is not a safe regular file".to_owned());
+        }
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Could not resolve the device replica directory".to_owned())?;
+    let temporary = parent.join(format!(".manifest-{}.tmp", Uuid::new_v4().simple()));
+    let result = (|| -> io::Result<()> {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        drop(file);
+        #[cfg(windows)]
+        {
+            let backup = parent.join(format!(".manifest-{}.bak", Uuid::new_v4().simple()));
+            match fs::symlink_metadata(path) {
+                Ok(_) => {
+                    fs::rename(path, &backup)?;
+                    if let Err(error) = fs::rename(&temporary, path) {
+                        let _ = fs::rename(&backup, path);
+                        return Err(error);
+                    }
+                    fs::remove_file(backup)?;
+                }
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    fs::rename(&temporary, path)?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        #[cfg(not(windows))]
+        fs::rename(&temporary, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+        return Err("Could not securely save the device replica manifest".to_owned());
+    }
+    Ok(())
 }
 
 fn ensure_safe_storage_directory(path: &Path) -> Result<(), String> {
@@ -1812,8 +2203,10 @@ fn validate_manifest_parent(parent: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        dedicated_storage_bytes, paths_overlap, unique_conflict_path, validate_relative_path,
-        DeviceReplicaEntry, DeviceReplicaManifest, SyncManifest, SyncedFile,
+        dedicated_storage_bytes, load_device_replica_manifest, paths_overlap,
+        save_device_replica_manifest, unique_conflict_path, valid_device_replica_entry,
+        validate_relative_path, DeviceReplicaEntry, DeviceReplicaManifest, SyncManifest,
+        SyncedFile,
     };
     use std::{collections::BTreeMap, fs};
     use uuid::Uuid;
@@ -1923,5 +2316,37 @@ mod tests {
         assert!(paths_overlap(&root, &root.join("sync")));
         assert!(paths_overlap(&root.join("sync"), &root));
         assert!(!paths_overlap(&root.join("sync"), &root.join("storage")));
+    }
+
+    #[test]
+    fn device_replica_manifest_can_be_replaced_and_rejects_unsafe_entries() {
+        let directory =
+            std::env::temp_dir().join(format!("cloudfusion-replica-manifest-{}", Uuid::new_v4()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("manifest.json");
+        save_device_replica_manifest(&path, &DeviceReplicaManifest::default()).unwrap();
+        let valid = DeviceReplicaEntry {
+            node_id: Uuid::new_v4().to_string(),
+            version_id: Uuid::new_v4().to_string(),
+            relative_path: "safe.blob".into(),
+            checksum: "a".repeat(64),
+            size_bytes: 9,
+        };
+        assert!(valid_device_replica_entry(&valid));
+        save_device_replica_manifest(
+            &path,
+            &DeviceReplicaManifest {
+                entries: vec![valid.clone()],
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            load_device_replica_manifest(&path).unwrap().entries.len(),
+            1
+        );
+        let mut unsafe_entry = valid;
+        unsafe_entry.relative_path = "../outside".into();
+        assert!(!valid_device_replica_entry(&unsafe_entry));
+        fs::remove_dir_all(directory).unwrap();
     }
 }

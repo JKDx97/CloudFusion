@@ -833,6 +833,7 @@ async fn run_mesh_active(
         tokio::spawn(availability_worker(
             client.clone(),
             config.sync_roots.clone(),
+            config.storage_root.clone(),
             credentials.clone(),
             availability_stop_rx,
             local_file_index.clone(),
@@ -957,6 +958,7 @@ async fn run_mesh_active(
 async fn availability_worker(
     client: reqwest::Client,
     roots: Vec<sync::NodeSyncRoot>,
+    storage_root: Option<String>,
     mut credentials: watch::Receiver<MeshCredentials>,
     mut shutdown: watch::Receiver<bool>,
     index: std::sync::Arc<std::sync::RwLock<HashMap<(String, u64), std::path::PathBuf>>>,
@@ -969,7 +971,7 @@ async fn availability_worker(
         if *shutdown.borrow() {
             break;
         }
-        match sync::verified_local_files(&roots).await {
+        match sync::verified_local_files(&roots, storage_root.as_deref()).await {
             Ok(files) => {
                 let mut next = HashMap::new();
                 for file in &files {
