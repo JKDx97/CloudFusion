@@ -489,28 +489,31 @@ flowchart LR
 
 **Estado:** parcial/beta. Los conectores y capacidades deben validarse con credenciales reales de cada proveedor; un elemento del catálogo marcado como próximo o experimental no implica que admita operaciones de archivos.
 
-## Fase 9 — Device Mesh & P2P (en desarrollo)
+## Fase 9 — Device Mesh & P2P (Windows Desktop)
 
 La Fase 9 permite que dispositivos autorizados compartan datos directamente cuando sea posible, manteniendo a CloudFusion como plano de control para identidad, permisos, versiones y autorización.
 
 ```mermaid
 flowchart LR
-  A[Desktop / NAS A] <--> N[LAN, TCP o QUIC]
+  A[CloudFusion Desktop para Windows A] <--> N[LAN directa: TCP / QUIC]
   A <--> R[Relay autorizado]
-  R <--> B[Desktop / NAS B]
+  R <--> B[CloudFusion Desktop para Windows B]
   A --> C[CloudFusion API: permisos y ticket de un solo uso]
   B --> C
   A -. fallback .-> P[Proveedor cloud]
   P -. fallback .-> B
 ```
 
-- El API anuncia disponibilidad por dispositivo/versión y emite tickets de transferencia de corta duración y uso único; al reclamarlos vuelve a comprobar dispositivo, revocación y permisos.
+- Cada instalación Windows conserva su identidad Peer ID Ed25519 y clave privada en el almacén seguro del sistema (Windows Credential Manager). La clave privada no se envía al API.
+- El API anuncia disponibilidad por dispositivo/versión y emite tickets de transferencia de corta duración y uso único; al reclamarlos vuelve a comprobar dispositivo, revocación y permisos, incluidos archivos compartidos y Workspaces.
 - La cuenta incluye un control global de privacidad P2P en Configuración → Dispositivos. Al desactivarlo se retiran los anuncios, se cancelan las transferencias activas y se detiene la malla Desktop; la sincronización y las descargas normales desde la nube continúan disponibles.
-- Desktop y el nodo headless/NAS pueden sincronizar cambios locales hacia una carpeta de CloudFusion Drive, servir versiones locales verificadas y preferir pares autorizados para descargas.
-- Los clientes admiten rutas directas TCP/QUIC y relay; si P2P no está disponible, se conserva la descarga cloud autorizada.
+- Desktop para Windows sincroniza cambios locales con una carpeta de CloudFusion Drive, sirve solo copias verificadas y prefiere pares autorizados al recibir versiones. Si ningún peer entrega la versión íntegra, usa la descarga cloud autorizada.
+- La malla descubre peers de la LAN mediante mDNS y usa conexiones libp2p seguras (Noise) por TCP/QUIC; con un relay configurado intenta conexión directa/hole punching y puede continuar por el circuito relay.
 - Los bloques se reciben en un archivo temporal y no se instalan como versión final hasta verificar tamaño y SHA-256. El almacenamiento dedicado por dispositivo mantiene una réplica de archivo completo.
 
-**Límites actuales:** la sincronización no es bidireccional entre dispositivos; las eliminaciones locales no se propagan. La fase sigue en desarrollo: falta completar la validación de extremo a extremo en Windows y endurecer las pruebas de descubrimiento LAN/NAT y operación del relay. El empaquetado/despliegue Linux/NAS se documentará y verificará aparte.
+**Validación local en Windows:** 24 pruebas de Desktop (incluida conexión directa TCP/QUIC), 2 pruebas del relay (incluido intercambio a través del circuito) y 50 pruebas del API para coordinación P2P, permisos, dispositivos y réplicas. Son pruebas reproducibles de integración/locales; no equivalen a una prueba WAN con dos redes físicas y NAT de clientes reales.
+
+**Alcance y límites:** esta entrega soporta y valida el cliente Desktop de Windows. El cliente Linux/macOS y el empaquetado NAS quedan expresamente diferidos. Para P2P por Internet hay que desplegar y configurar un relay accesible, con la identidad/allowlist de peers; CloudFusion no incluye un relay público administrado automáticamente. La sincronización conserva la copia remota cuando hay conflictos, pero no propaga borrados locales ni implementa sincronización peer-to-peer bidireccional. Se mantienen réplicas cloud durables al habilitar almacenamiento de dispositivos.
 
 ## Fuera del alcance actual
 
