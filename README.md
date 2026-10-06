@@ -505,6 +505,7 @@ flowchart LR
 ```
 
 - El API anuncia disponibilidad por dispositivo/versión y emite tickets de transferencia de corta duración y uso único; al reclamarlos vuelve a comprobar dispositivo, revocación y permisos.
+- La cuenta incluye un control global de privacidad P2P en Configuración → Dispositivos. Al desactivarlo se retiran los anuncios, se cancelan las transferencias activas y se detiene la malla Desktop; la sincronización y las descargas normales desde la nube continúan disponibles.
 - Desktop y el nodo headless/NAS pueden sincronizar cambios locales hacia una carpeta de CloudFusion Drive, servir versiones locales verificadas y preferir pares autorizados para descargas.
 - Los clientes admiten rutas directas TCP/QUIC y relay; si P2P no está disponible, se conserva la descarga cloud autorizada.
 - Los bloques se reciben en un archivo temporal y no se instalan como versión final hasta verificar tamaño y SHA-256. El almacenamiento dedicado por dispositivo mantiene una réplica de archivo completo.

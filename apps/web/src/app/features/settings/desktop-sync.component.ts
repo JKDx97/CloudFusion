@@ -89,6 +89,7 @@ export class DesktopSyncComponent implements OnInit, OnDestroy {
   readonly busy = signal(false);
   readonly error = signal<string | null>(null);
   readonly meshEnabled = signal(false);
+  readonly globalP2pEnabled = signal(true);
   readonly lanDiscoveryEnabled = signal(false);
   readonly internetP2pEnabled = signal(false);
   readonly relayAllowed = signal(true);
@@ -292,23 +293,26 @@ export class DesktopSyncComponent implements OnInit, OnDestroy {
   private async loadMeshConfiguration(startIfEnabled = true): Promise<void> {
     const deviceId = this.authService.deviceId;
     if (!deviceId) return;
-    const [devices, peers] = await Promise.all([
+    const [devices, peers, privacy] = await Promise.all([
       firstValueFrom(this.http.get<ApiResponse<RegisteredDevice[]>>(`${this.apiUrl}/devices`)),
       firstValueFrom(this.http.get<ApiResponse<MeshPeer[]>>(`${this.apiUrl}/devices/mesh-peers`)),
+      firstValueFrom(this.http.get<ApiResponse<{ enabled: boolean }>>(`${this.apiUrl}/p2p/privacy`)),
     ]);
+    this.globalP2pEnabled.set(privacy.data.enabled);
     const current = devices.data.find((item) => item.id === deviceId);
     const lan = !!current?.lanDiscoveryEnabled;
     const internet = !!current?.internetP2pEnabled;
     const relay = current?.relayAllowed ?? true;
-    const enabled = !!current?.p2pEnabled && (lan || internet);
+    const enabled = privacy.data.enabled && !!current?.p2pEnabled && (lan || internet);
     this.meshEnabled.set(enabled);
     this.lanDiscoveryEnabled.set(lan);
     this.internetP2pEnabled.set(internet);
     this.relayAllowed.set(relay);
     this.serveLocalFiles.set(!!current?.serveLocalFiles);
     this.syncCoordinator.setPeerSharing(enabled, !!current?.serveLocalFiles);
-    this.meshPeers.set(peers.data);
-    await this.invoke<void>('set_trusted_mesh_peers', { peerIds: peers.data.map((peer) => peer.peerId) });
+    const availablePeers = privacy.data.enabled ? peers.data : [];
+    this.meshPeers.set(availablePeers);
+    await this.invoke<void>('set_trusted_mesh_peers', { peerIds: availablePeers.map((peer) => peer.peerId) });
     if (enabled && startIfEnabled) {
       await this.configureMeshApi();
       await this.invoke<void>('start_lan_mesh', {

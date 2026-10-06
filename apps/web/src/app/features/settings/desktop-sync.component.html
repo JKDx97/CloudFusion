@@ -57,23 +57,26 @@
           <h2 class="font-semibold">Conexión entre tus dispositivos</h2>
           <p class="mt-1 max-w-3xl text-sm leading-6 text-slate-600">Elige cómo se pueden encontrar los equipos autorizados de tu cuenta. Las transferencias P2P solo se ofrecen cuando existe una copia local verificada.</p>
         </div>
+        @if (!globalP2pEnabled()) {
+          <p role="status" class="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">El control global de privacidad P2P está desactivado en Configuración &gt; Dispositivos. La conexión entre equipos y el servicio de malla están detenidos.</p>
+        }
         <div class="mt-4 grid gap-3 md:grid-cols-2">
           <label class="flex items-start gap-3 rounded-lg border border-slate-200 p-3 text-sm text-slate-700">
-            <input class="mt-1" type="checkbox" [checked]="lanDiscoveryEnabled()" [disabled]="meshBusy()" (change)="updateMeshSetting($event, 'lanDiscoveryEnabled')" />
+            <input class="mt-1" type="checkbox" [checked]="lanDiscoveryEnabled()" [disabled]="meshBusy() || !globalP2pEnabled()" (change)="updateMeshSetting($event, 'lanDiscoveryEnabled')" />
             <span><span class="font-semibold">Descubrimiento en red local (LAN)</span><span class="mt-1 block text-xs leading-5 text-slate-500">Busca equipos autorizados conectados a la misma red.</span></span>
           </label>
           <label class="flex items-start gap-3 rounded-lg border border-slate-200 p-3 text-sm text-slate-700">
-            <input class="mt-1" type="checkbox" [checked]="internetP2pEnabled()" [disabled]="meshBusy()" (change)="updateMeshSetting($event, 'internetP2pEnabled')" />
+            <input class="mt-1" type="checkbox" [checked]="internetP2pEnabled()" [disabled]="meshBusy() || !globalP2pEnabled()" (change)="updateMeshSetting($event, 'internetP2pEnabled')" />
             <span><span class="font-semibold">Intentar conexión P2P por Internet</span><span class="mt-1 block text-xs leading-5 text-slate-500">Intenta una conexión directa entre equipos; depende de la red y de tener un servicio de descubrimiento/relay configurado.</span></span>
           </label>
           <label class="flex items-start gap-3 rounded-lg border border-slate-200 p-3 text-sm text-slate-700 md:col-span-2">
-            <input class="mt-1" type="checkbox" [checked]="relayAllowed()" [disabled]="meshBusy()" (change)="updateMeshSetting($event, 'relayAllowed')" />
+            <input class="mt-1" type="checkbox" [checked]="relayAllowed()" [disabled]="meshBusy() || !globalP2pEnabled()" (change)="updateMeshSetting($event, 'relayAllowed')" />
             <span><span class="font-semibold">Permitir relay como ruta alternativa</span><span class="mt-1 block text-xs leading-5 text-slate-500">El relay debe estar desplegado y configurado en ambos equipos mediante CLOUDFUSION_RELAY_MULTIADDR; CloudFusion no aloja un relay público automáticamente.</span></span>
           </label>
         </div>
         <p class="mt-4 rounded-lg bg-slate-50 px-3 py-2 text-sm text-slate-600">Estado: {{ meshStatus() }} · {{ meshEnabled() ? 'Conexión habilitada' : 'Conexión desactivada' }}</p>
         <label class="mt-4 flex items-start gap-3 rounded-lg border border-slate-200 p-3 text-sm text-slate-700">
-          <input class="mt-1" type="checkbox" [checked]="serveLocalFiles()" (change)="updateLocalFileServing($event)" />
+          <input class="mt-1" type="checkbox" [checked]="serveLocalFiles()" [disabled]="!globalP2pEnabled()" (change)="updateLocalFileServing($event)" />
           <span><span class="font-semibold">Permitir que este equipo ofrezca copias locales verificadas</span><span class="mt-1 block text-xs leading-5 text-slate-500">Solo tus dispositivos autorizados pueden solicitarlas. Desactívalo para dejar de compartir desde este equipo.</span></span>
         </label>
         @if (meshEnabled()) {

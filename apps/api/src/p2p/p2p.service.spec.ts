@@ -44,6 +44,14 @@ function createTransfer(status = PeerTransferStatus.AUTHORIZED): PeerTransferSes
 
 function makeService() {
   const devices = { findOne: jest.fn().mockResolvedValue(sourceDevice) };
+  const users = {
+    findOne: jest.fn(async ({ where }: { where: { id: string } }) => ({ id: where.id, p2pEnabled: true })),
+    find: jest.fn().mockResolvedValue([
+      { id: 'source-user', p2pEnabled: true },
+      { id: 'destination-user', p2pEnabled: true },
+    ]),
+    save: jest.fn(async (value) => value),
+  };
   const nodes = { findOne: jest.fn().mockResolvedValue(node) };
   const versions = { findOne: jest.fn().mockResolvedValue(version) };
   const availability = {
@@ -115,11 +123,86 @@ function makeService() {
     jwt as never,
     config as never,
     audit as never,
+    users as never,
   );
-  return { service, devices, nodes, versions, availability, deviceStorageReplicas, storageTargets, transfers, dataSource, manager, deviceSessions, permissions, jwt, config, audit, queryBuilder, ticketClaims };
+  return { service, devices, users, nodes, versions, availability, deviceStorageReplicas, storageTargets, transfers, dataSource, manager, deviceSessions, permissions, jwt, config, audit, queryBuilder, ticketClaims };
 }
 
 describe('P2pService transfer coordination', () => {
+  it('persists account-wide P2P privacy and revokes advertisements and active transfers when disabled', async () => {
+    const ctx = makeService();
+    const user = { id: 'source-user', p2pEnabled: true };
+    ctx.users.findOne.mockResolvedValueOnce(user);
+
+    const result = await ctx.service.updatePrivacySettings('source-user', false);
+
+    expect(result).toEqual({ enabled: false });
+    expect(ctx.users.save).toHaveBeenCalledWith(expect.objectContaining({ id: 'source-user', p2pEnabled: false }));
+    expect(ctx.availability.update).toHaveBeenCalledWith(
+      { userId: 'source-user', status: 'AVAILABLE' },
+      expect.objectContaining({ status: 'OFFLINE', expiresAt: expect.any(Date) }),
+    );
+    expect(ctx.queryBuilder.update).toHaveBeenCalledWith(PeerTransferSession);
+    expect(ctx.queryBuilder.set).toHaveBeenCalledWith(expect.objectContaining({ status: 'CANCELLED' }));
+    expect(ctx.audit.record).toHaveBeenCalledWith('source-user', 'P2P_PRIVACY_DISABLED', 'User', 'source-user');
+  });
+
+  it('blocks advertisements and peer discovery for an account with P2P privacy disabled', async () => {
+    const ctx = makeService();
+    ctx.users.findOne.mockResolvedValue({ id: 'source-user', p2pEnabled: false });
+
+    await expect(ctx.service.advertiseAvailability('source-user', 'source-device', {
+      nodeId: 'node-id', versionId: 'version-id', contentHash: checksum, sizeBytes: '17',
+    })).rejects.toBeInstanceOf(ForbiddenException);
+    await expect(ctx.service.listAvailability('source-user', 'node-id', 'version-id')).resolves.toEqual([]);
+    expect(ctx.availability.save).not.toHaveBeenCalled();
+    expect(ctx.nodes.findOne).not.toHaveBeenCalled();
+  });
+
+  it('hides advertisements owned by an account with P2P privacy disabled', async () => {
+    const ctx = makeService();
+    ctx.availability.find.mockResolvedValue([{
+      userId: 'source-user', deviceId: 'source-device', nodeId: 'node-id', versionId: 'version-id',
+      contentHash: checksum, sizeBytes: '17', lastVerifiedAt: new Date(), expiresAt: new Date(Date.now() + 60_000),
+    }]);
+    ctx.users.find.mockResolvedValue([{ id: 'source-user', p2pEnabled: false }]);
+
+    await expect(ctx.service.listAvailability('destination-user', 'node-id', 'version-id')).resolves.toEqual([]);
+    expect(ctx.devices.findOne).not.toHaveBeenCalled();
+  });
+
+  it('does not authorize a peer transfer when either account has disabled P2P', async () => {
+    const ctx = makeService();
+    ctx.users.findOne.mockImplementation(async ({ where }: { where: { id: string } }) => ({
+      id: where.id,
+      p2pEnabled: where.id !== 'source-user',
+    }));
+
+    await expect(ctx.service.authorizeTransfer('destination-user', 'destination-device', {
+      sourceDeviceId: 'source-device', nodeId: 'node-id', versionId: 'version-id',
+    })).rejects.toBeInstanceOf(ForbiddenException);
+    expect(ctx.dataSource.transaction).not.toHaveBeenCalled();
+  });
+
+  it('cancels an active transfer when an account opts out before the next transfer poll', async () => {
+    const ctx = makeService();
+    const transfer = createTransfer(PeerTransferStatus.TRANSFERRING);
+    ctx.transfers.findOne.mockResolvedValue(transfer);
+    ctx.users.findOne.mockImplementation(async ({ where }: { where: { id: string } }) => ({
+      id: where.id,
+      p2pEnabled: where.id !== 'source-user',
+    }));
+
+    const result = await ctx.service.getTransfer('source-user', 'source-device', transfer.id);
+
+    expect(result.status).toBe(PeerTransferStatus.CANCELLED);
+    expect(ctx.transfers.save).toHaveBeenCalledWith(expect.objectContaining({
+      id: transfer.id,
+      status: PeerTransferStatus.CANCELLED,
+      completedAt: expect.any(Date),
+    }));
+  });
+
   it('advertises only an exact readable version for a device that opted in to serving files', async () => {
     const ctx = makeService();
     const result = await ctx.service.advertiseAvailability('source-user', 'source-device', {

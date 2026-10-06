@@ -22,6 +22,7 @@ import { StorageReplica } from '../virtual-fs/entities/storage-replica.entity';
 import { StorageReplicaStatus } from '../virtual-fs/enums/storage-replica-status.enum';
 import { VirtualNodeType } from '../virtual-fs/enums/virtual-node-type.enum';
 import { CompleteDeviceStorageReplicaDto } from './dto/complete-device-storage-replica.dto';
+import { User } from '../users/entities/user.entity';
 
 const DEVICE_STORAGE_HEARTBEAT_TTL_MS = 3 * 60 * 1000;
 const DEVICE_REPLICA_LEASE_MS = 20 * 60 * 1000;
@@ -57,6 +58,7 @@ export class DeviceStorageReplicaService {
     private readonly deviceSessions: DevicesService,
     private readonly permissions: PermissionsService,
     private readonly audit: AuditService,
+    @InjectRepository(User) private readonly users: Repository<User>,
   ) {}
 
   async next(userId: string, deviceId?: string): Promise<{ assignment: DeviceStorageReplicaWorkItem | null }> {
@@ -174,7 +176,9 @@ export class DeviceStorageReplicaService {
       return null;
     });
 
-    if (storageOnline && device.p2pEnabled && device.serveLocalFiles) await this.renewReplicaAvailability(device);
+    if (storageOnline && device.p2pEnabled && device.serveLocalFiles && await this.isGlobalP2pEnabled(userId)) {
+      await this.renewReplicaAvailability(device);
+    }
     return { assignment: assignment ? this.toWorkItem(assignment) : null };
   }
 
@@ -222,7 +226,7 @@ export class DeviceStorageReplicaService {
     assignment.lastError = null;
     await this.assignments.save(assignment);
 
-    if (device.p2pEnabled && device.serveLocalFiles) {
+    if (device.p2pEnabled && device.serveLocalFiles && await this.isGlobalP2pEnabled(userId)) {
       await this.savePeerAvailability(userId, device.id, assignment, now);
     }
     await this.audit.record(userId, 'DEVICE_REPLICA_STORED', 'DeviceStorageReplica', assignment.id, {
@@ -239,6 +243,11 @@ export class DeviceStorageReplicaService {
     const device = await this.deviceSessions.getActive(userId, deviceId);
     if (!device.storageContributionEnabled) throw new ForbiddenException('Device storage contribution is disabled');
     return device;
+  }
+
+  private async isGlobalP2pEnabled(userId: string): Promise<boolean> {
+    const user = await this.users.findOne({ where: { id: userId }, select: { id: true, p2pEnabled: true } });
+    return user?.p2pEnabled === true;
   }
 
   private async sumAssignments(

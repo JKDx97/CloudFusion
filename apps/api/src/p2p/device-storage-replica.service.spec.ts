@@ -60,6 +60,7 @@ function makeService(overrides: {
   };
   const permissions = { canDownload: jest.fn().mockResolvedValue(true) };
   const audit = { record: jest.fn().mockResolvedValue(undefined) };
+  const users = { findOne: jest.fn().mockResolvedValue({ id: 'owner-id', p2pEnabled: true }) };
   const service = new DeviceStorageReplicaService(
     assignments as never,
     nodes as never,
@@ -70,8 +71,9 @@ function makeService(overrides: {
     deviceSessions as never,
     permissions as never,
     audit as never,
+    users as never,
   );
-  return { service, assignments, nodes, versions, cloudReplicas, deviceSessions, permissions, audit };
+  return { service, assignments, nodes, versions, cloudReplicas, availability, deviceSessions, permissions, audit, users };
 }
 
 describe('DeviceStorageReplicaService', () => {
@@ -89,6 +91,19 @@ describe('DeviceStorageReplicaService', () => {
       lastVerifiedAt: expect.any(Date),
     }));
     expect(fixture.audit.record).toHaveBeenCalledWith('owner-id', 'DEVICE_REPLICA_STORED', 'DeviceStorageReplica', 'assignment-id', expect.any(Object));
+  });
+
+  it('does not publish local device replicas while account-wide P2P privacy is disabled', async () => {
+    const fixture = makeService({ activeDevice: { ...device, p2pEnabled: true, serveLocalFiles: true } });
+    fixture.users.findOne.mockResolvedValue({ id: 'owner-id', p2pEnabled: false });
+
+    await fixture.service.complete('owner-id', 'device-id', 'assignment-id', {
+      contentHash: fileHash,
+      sizeBytes: '17',
+    });
+
+    expect(fixture.assignments.save).toHaveBeenCalledWith(expect.objectContaining({ status: DeviceStorageReplicaStatus.AVAILABLE }));
+    expect(fixture.availability.save).not.toHaveBeenCalled();
   });
 
   it('rejects a device report whose content hash or size differs from the assignment', async () => {

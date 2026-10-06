@@ -27,6 +27,7 @@ import { DeviceStorageReplica, DeviceStorageReplicaStatus } from './entities/dev
 import { StorageTarget } from '../providers/object-storage/entities/storage-target.entity';
 import { PeerTransferSession } from './entities/peer-transfer-session.entity';
 import { PeerTransferStatus, PeerTransferTransport } from './enums/peer-transfer-status.enum';
+import { User } from '../users/entities/user.entity';
 
 const TICKET_ISSUER = 'cloudfusion-api';
 const TICKET_AUDIENCE = 'cloudfusion-peer-transfer';
@@ -72,9 +73,48 @@ export class P2pService {
     private readonly jwt: JwtService,
     private readonly config: ConfigService,
     private readonly audit: AuditService,
+    @InjectRepository(User) private readonly users: Repository<User>,
   ) {}
 
+  async getPrivacySettings(userId: string) {
+    const user = await this.users.findOne({ where: { id: userId } });
+    if (!user) throw new NotFoundException('User not found');
+    return { enabled: user.p2pEnabled };
+  }
+
+  async updatePrivacySettings(userId: string, enabled: boolean) {
+    const user = await this.users.findOne({ where: { id: userId } });
+    if (!user) throw new NotFoundException('User not found');
+    const changed = user.p2pEnabled !== enabled;
+    if (changed) {
+      user.p2pEnabled = enabled;
+      await this.users.save(user);
+    }
+
+    if (!enabled) {
+      const now = new Date();
+      await this.availability.update(
+        { userId, status: DeviceFileAvailabilityStatus.AVAILABLE },
+        { status: DeviceFileAvailabilityStatus.OFFLINE, expiresAt: now },
+      );
+      await this.transfers.createQueryBuilder()
+        .update(PeerTransferSession)
+        .set({ status: PeerTransferStatus.CANCELLED, completedAt: now })
+        .where(
+          'status IN (:...activeStatuses) AND (source_user_id = :userId OR destination_user_id = :userId)',
+          { activeStatuses: ACTIVE_TRANSFER_STATUSES, userId },
+        )
+        .execute();
+    }
+
+    if (changed) {
+      await this.audit.record(userId, enabled ? 'P2P_PRIVACY_ENABLED' : 'P2P_PRIVACY_DISABLED', 'User', userId);
+    }
+    return { enabled };
+  }
+
   async advertiseAvailability(userId: string, deviceId: string | undefined, dto: AdvertiseAvailabilityDto) {
+    await this.requireGlobalP2pEnabled(userId);
     const device = await this.requireCurrentDevice(userId, deviceId);
     this.requireServingDevice(device);
     return this.advertiseForDevice(userId, device, dto, true);
@@ -84,6 +124,7 @@ export class P2pService {
     if (!Array.isArray(items) || items.length < 1 || items.length > 500) {
       throw new BadRequestException('A P2P availability batch must contain between 1 and 500 items');
     }
+    await this.requireGlobalP2pEnabled(userId);
     const device = await this.requireCurrentDevice(userId, deviceId);
     this.requireServingDevice(device);
     const results: Array<{ nodeId: string; versionId: string; advertised: boolean }> = [];
@@ -161,6 +202,7 @@ export class P2pService {
   }
 
   async listAvailability(userId: string, nodeId: string, versionId: string) {
+    if (!(await this.isGlobalP2pEnabled(userId))) return [];
     const { node, version } = await this.requireReadableVersion(userId, nodeId, versionId);
     const now = new Date();
     await this.availability.update(
@@ -185,8 +227,14 @@ export class P2pService {
         order: { lastVerifiedAt: 'DESC' },
       take: 256,
     });
+    const ownerIds = [...new Set(rows.map((row) => row.userId))];
+    const enabledOwners = ownerIds.length
+      ? await this.users.find({ where: { id: In(ownerIds) }, select: { id: true, p2pEnabled: true } })
+      : [];
+    const enabledOwnerIds = new Set(enabledOwners.filter((owner) => owner.p2pEnabled).map((owner) => owner.id));
     const peers = [];
     for (const row of rows) {
+      if (!enabledOwnerIds.has(row.userId)) continue;
       const device = await this.devices.findOne({ where: { id: row.deviceId, revokedAt: IsNull() } });
       if (!device || row.userId !== device.userId || !device.peerId || !device.p2pEnabled || !device.serveLocalFiles) continue;
       if (await this.hasStaleStorageHeartbeat(device)) {
@@ -208,10 +256,12 @@ export class P2pService {
   }
 
   async authorizeTransfer(userId: string, deviceId: string | undefined, dto: AuthorizePeerTransferDto) {
+    await this.requireGlobalP2pEnabled(userId);
     const destination = await this.requireCurrentDevice(userId, deviceId);
     this.requirePeerEnabled(destination);
     const source = await this.devices.findOne({ where: { id: dto.sourceDeviceId, revokedAt: IsNull() } });
     if (!source) throw new NotFoundException('Source device is unavailable');
+    await this.requireGlobalP2pEnabled(source.userId);
     if (source.id === destination.id) throw new ConflictException('Source and destination devices must be different');
     this.requireServingDevice(source);
 
@@ -328,6 +378,8 @@ export class P2pService {
     if (!transfer || transfer.status !== PeerTransferStatus.AUTHORIZED) {
       throw new ConflictException('Peer transfer ticket has already been used or revoked');
     }
+    await this.requireGlobalP2pEnabled(transfer.sourceUserId);
+    await this.requireGlobalP2pEnabled(transfer.destinationUserId);
     if (transfer.ticketExpiresAt <= new Date() || claims.exp * 1000 <= Date.now()) {
       transfer.status = PeerTransferStatus.EXPIRED;
       await this.transfers.save(transfer);
@@ -388,6 +440,10 @@ export class P2pService {
     bytesTransferred?: string,
   ) {
     const transfer = await this.requireParticipant(userId, deviceId, transferId);
+    if (nextStatus !== PeerTransferStatus.CANCELLED && ACTIVE_TRANSFER_STATUSES.includes(transfer.status)) {
+      await this.requireGlobalP2pEnabled(transfer.sourceUserId);
+      await this.requireGlobalP2pEnabled(transfer.destinationUserId);
+    }
     const isProgressUpdate = transfer.status === PeerTransferStatus.TRANSFERRING && nextStatus === PeerTransferStatus.TRANSFERRING;
     if (!isProgressUpdate && !this.canTransition(transfer.status, nextStatus)) {
       throw new ConflictException('Invalid peer transfer state transition');
@@ -427,6 +483,13 @@ export class P2pService {
   async getTransfer(userId: string, deviceId: string | undefined, transferId: string) {
     const transfer = await this.requireParticipant(userId, deviceId, transferId);
     if (ACTIVE_TRANSFER_STATUSES.includes(transfer.status)) {
+      if (!(await this.isGlobalP2pEnabled(transfer.sourceUserId)) || !(await this.isGlobalP2pEnabled(transfer.destinationUserId))) {
+        transfer.status = PeerTransferStatus.CANCELLED;
+        transfer.completedAt = new Date();
+        await this.transfers.save(transfer);
+        await this.audit.record(userId, 'P2P_TRANSFER_CANCELLED_PRIVACY', 'PeerTransferSession', transfer.id);
+        return this.toPublicTransfer(transfer);
+      }
       const [source, destination] = await Promise.all([
         this.deviceSessions.getActive(transfer.sourceUserId, transfer.sourceDeviceId),
         this.deviceSessions.getActive(transfer.destinationUserId, transfer.destinationDeviceId),
@@ -505,6 +568,17 @@ export class P2pService {
   private async requireCurrentDevice(userId: string, deviceId?: string) {
     if (!deviceId) throw new UnauthorizedException('A registered device session is required for P2P');
     return this.deviceSessions.getActive(userId, deviceId);
+  }
+
+  private async isGlobalP2pEnabled(userId: string): Promise<boolean> {
+    const user = await this.users.findOne({ where: { id: userId }, select: { id: true, p2pEnabled: true } });
+    return user?.p2pEnabled === true;
+  }
+
+  private async requireGlobalP2pEnabled(userId: string): Promise<void> {
+    if (!(await this.isGlobalP2pEnabled(userId))) {
+      throw new ForbiddenException('P2P is disabled in this account privacy settings');
+    }
   }
 
   private requirePeerEnabled(device: UserDevice) {

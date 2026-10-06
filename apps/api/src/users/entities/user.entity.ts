@@ -41,6 +41,9 @@ export class User {
   @Column({ type: 'enum', enum: UserStatus, default: UserStatus.ACTIVE })
   status!: UserStatus;
 
+  @Column({ name: 'p2p_enabled', type: 'boolean', default: true })
+  p2pEnabled!: boolean;
+
   @Column({
     name: 'refresh_token_hash',
     type: 'text',

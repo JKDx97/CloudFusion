@@ -128,11 +128,13 @@ export class DesktopSyncBackgroundService {
   private remotePollTimer?: ReturnType<typeof setInterval>;
   private storageHeartbeatTimer?: ReturnType<typeof setInterval>;
   private deviceReplicaTimer?: ReturnType<typeof setInterval>;
+  private p2pPrivacyTimer?: ReturnType<typeof setInterval>;
   private deviceReplicaInFlight = false;
   private deviceReplicaRetryAt = 0;
   private remotePollInFlight = false;
   private meshEnabled = false;
   private serveLocalFiles = false;
+  private globalP2pEnabled = true;
   private uploadQueue: Promise<void> = Promise.resolve();
   private readonly debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly advertisedCopies = new Map<string, SyncUploadReceipt>();
@@ -155,9 +157,11 @@ export class DesktopSyncBackgroundService {
         if (this.remotePollTimer) clearInterval(this.remotePollTimer);
         if (this.storageHeartbeatTimer) clearInterval(this.storageHeartbeatTimer);
         if (this.deviceReplicaTimer) clearInterval(this.deviceReplicaTimer);
+        if (this.p2pPrivacyTimer) clearInterval(this.p2pPrivacyTimer);
         this.remotePollTimer = undefined;
         this.storageHeartbeatTimer = undefined;
         this.deviceReplicaTimer = undefined;
+        this.p2pPrivacyTimer = undefined;
         this.deviceReplicaRetryAt = 0;
         this.withdrawAllCopies(true);
         this.rootsState.set([]);
@@ -170,6 +174,7 @@ export class DesktopSyncBackgroundService {
       if (this.remotePollTimer) clearInterval(this.remotePollTimer);
       if (this.storageHeartbeatTimer) clearInterval(this.storageHeartbeatTimer);
       if (this.deviceReplicaTimer) clearInterval(this.deviceReplicaTimer);
+      if (this.p2pPrivacyTimer) clearInterval(this.p2pPrivacyTimer);
       this.lastUserId = user.id;
       void this.refresh().then(() => {
         this.pollRemoteRoots();
@@ -179,6 +184,7 @@ export class DesktopSyncBackgroundService {
       this.remotePollTimer = setInterval(() => void this.pollRemoteRoots(), 20_000);
       this.storageHeartbeatTimer = setInterval(() => void this.reportDeviceStorageHeartbeat(), 60_000);
       this.deviceReplicaTimer = setInterval(() => void this.processDeviceStorageReplica(), 15_000);
+      this.p2pPrivacyTimer = setInterval(() => void this.refreshGlobalP2pPrivacy(), 15_000);
     });
   }
 
@@ -227,6 +233,17 @@ export class DesktopSyncBackgroundService {
     }
   }
 
+  async updateGlobalP2pPrivacy(enabled: boolean): Promise<void> {
+    this.globalP2pEnabled = enabled;
+    if (!this.isDesktop()) return;
+    if (!enabled) {
+      this.setPeerSharing(false, false);
+      await this.invoke<void>('stop_lan_mesh').catch(() => undefined);
+      return;
+    }
+    await this.loadPeerSharingSettings();
+  }
+
   syncFile(rootId: string, relativePath: string): Promise<boolean> {
     return this.queueUpload({
       id: '', rootId, relativePath, operation: 'modified', detectedAtMs: Date.now(),
@@ -270,14 +287,23 @@ export class DesktopSyncBackgroundService {
     const deviceId = this.auth.deviceId;
     if (!deviceId) return;
     try {
-      const response = await firstValueFrom(this.http.get<ApiResponse<Array<{
-        id: string;
-        p2pEnabled: boolean;
-        lanDiscoveryEnabled: boolean;
-        internetP2pEnabled: boolean;
-        relayAllowed: boolean;
-        serveLocalFiles: boolean;
-      }>>>(`${this.apiUrl}/devices`));
+      const [response, privacy] = await Promise.all([
+        firstValueFrom(this.http.get<ApiResponse<Array<{
+          id: string;
+          p2pEnabled: boolean;
+          lanDiscoveryEnabled: boolean;
+          internetP2pEnabled: boolean;
+          relayAllowed: boolean;
+          serveLocalFiles: boolean;
+        }>>>(`${this.apiUrl}/devices`)),
+        firstValueFrom(this.http.get<ApiResponse<{ enabled: boolean }>>(`${this.apiUrl}/p2p/privacy`)),
+      ]);
+      this.globalP2pEnabled = privacy.data.enabled;
+      if (!this.globalP2pEnabled) {
+        this.setPeerSharing(false, false);
+        await this.invoke<void>('stop_lan_mesh').catch(() => undefined);
+        return;
+      }
       const current = response.data.find((device) => device.id === deviceId);
       const enabled = !!current?.p2pEnabled && (!!current.lanDiscoveryEnabled || !!current.internetP2pEnabled);
       this.setPeerSharing(enabled, enabled && !!current?.serveLocalFiles);
@@ -293,6 +319,25 @@ export class DesktopSyncBackgroundService {
         relayAllowed: current?.relayAllowed ?? true,
       });
     } catch {
+      this.setPeerSharing(false, false);
+      await this.invoke<void>('stop_lan_mesh').catch(() => undefined);
+    }
+  }
+
+  private async refreshGlobalP2pPrivacy(): Promise<void> {
+    if (!this.isDesktop() || !this.lastUserId) return;
+    try {
+      const response = await firstValueFrom(this.http.get<ApiResponse<{ enabled: boolean }>>(`${this.apiUrl}/p2p/privacy`));
+      const wasEnabled = this.globalP2pEnabled;
+      this.globalP2pEnabled = response.data.enabled;
+      if (!this.globalP2pEnabled) {
+        this.setPeerSharing(false, false);
+        await this.invoke<void>('stop_lan_mesh').catch(() => undefined);
+      } else if (!wasEnabled) {
+        await this.loadPeerSharingSettings();
+      }
+    } catch {
+      this.globalP2pEnabled = false;
       this.setPeerSharing(false, false);
       await this.invoke<void>('stop_lan_mesh').catch(() => undefined);
     }

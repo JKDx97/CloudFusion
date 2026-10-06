@@ -17,12 +17,13 @@ import { StorageReplica } from '../virtual-fs/entities/storage-replica.entity';
 import { StorageObject } from '../virtual-fs/entities/storage-object.entity';
 import { DeviceStorageReplica } from './entities/device-storage-replica.entity';
 import { DeviceStorageReplicaService } from './device-storage-replica.service';
+import { User } from '../users/entities/user.entity';
 
 @Module({
   imports: [
     ConfigModule,
     JwtModule.register({}),
-    TypeOrmModule.forFeature([UserDevice, StorageTarget, StorageObject, StorageReplica, DeviceStorageReplica, VirtualNode, FileVersion, DeviceFileAvailability, PeerTransferSession]),
+    TypeOrmModule.forFeature([User, UserDevice, StorageTarget, StorageObject, StorageReplica, DeviceStorageReplica, VirtualNode, FileVersion, DeviceFileAvailability, PeerTransferSession]),
     DevicesModule,
     PermissionsModule,
     AuditModule,

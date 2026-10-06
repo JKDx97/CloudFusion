@@ -4,7 +4,7 @@ import { Repository } from 'typeorm';
 import type { RegisterDto } from '../auth/dto/register.dto';
 import { User, UserRole, UserStatus } from './entities/user.entity';
 
-export type PublicUser = Omit<User, 'passwordHash' | 'refreshTokenHash' | 'cloudAccounts'>;
+export type PublicUser = Omit<User, 'passwordHash' | 'refreshTokenHash' | 'cloudAccounts' | 'p2pEnabled'>;
 
 @Injectable()
 export class UsersService {

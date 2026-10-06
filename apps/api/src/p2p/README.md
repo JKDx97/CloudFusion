@@ -4,6 +4,7 @@ This module is the control plane for peer transfers. The server keeps file-versi
 
 ## Current endpoints
 
+- `GET /p2p/privacy` returns the account-wide P2P permission; `PATCH /p2p/privacy` accepts `{ "enabled": boolean }`. Disabling withdraws all of that user's active availability advertisements and cancels active peer-transfer sessions involving the account.
 - `POST /p2p/availability` advertises the exact readable `nodeId`/`versionId` for the authenticated device. The client supplies its locally computed SHA-256 and byte size; the API accepts the advertisement only when both match the server-owned `FileVersion` metadata.
 - `GET /p2p/availability?nodeId=…&versionId=…` returns only unexpired advertisements whose devices still permit serving and whose users still have read permission.
 - `DELETE /p2p/availability/:nodeId/:versionId` withdraws the current device's advertisement.
@@ -11,7 +12,7 @@ This module is the control plane for peer transfers. The server keeps file-versi
 - `POST /p2p/transfers/:id/claim` consumes the ticket only on its named source device and rechecks both device sessions, revocation, version and read permissions.
 - `GET /p2p/transfers/:id`, `POST /p2p/transfers/:id/state`, and `POST /p2p/transfers/:id/cancel` are scoped to the two participating device sessions.
 
-Viewer/read access is sufficient for a download. This includes cross-user Workspace or resource-share access: the destination and source users are checked independently by the permission engine, and the checks are repeated when the source claims the ticket. Public-link transfers deliberately do not use personal devices as sources. A receiver alone can advance a session to `VERIFYING`/`COMPLETED`, and completion requires the exact authorized byte count. The Desktop receiver also verifies the full SHA-256 before it marks a transfer complete. mDNS only contributes temporary routes; neither LAN presence nor an account-local peer list grants transfer authorization.
+Viewer/read access is sufficient for a download. This includes cross-user Workspace or resource-share access: the destination and source users are checked independently by the permission engine, and the checks are repeated when the source claims the ticket. Public-link transfers deliberately do not use personal devices as sources. A receiver alone can advance a session to `VERIFYING`/`COMPLETED`, and completion requires the exact authorized byte count. The Desktop receiver also verifies the full SHA-256 before it marks a transfer complete. mDNS only contributes temporary routes; neither LAN presence nor an account-local peer list grants transfer authorization. The account-wide privacy gate is checked when advertising, discovering, authorizing, claiming, and updating transfers, so a device-level opt-in cannot override an account-level opt-out. Disabling P2P does not disable ordinary cloud uploads/downloads or device storage replication; it only stops device-to-device discovery and transfer.
 
 ## Configuration
 
@@ -20,6 +21,8 @@ Viewer/read access is sufficient for a download. This includes cross-user Worksp
 - `P2P_MAX_CONCURRENT_TRANSFERS` — active sessions per device; clamped to 1–16, default 4.
 
 The `1734000000000-PeerTransferCoordination` migration creates the availability and session tables and required indexes. Apply migrations before using these endpoints; ORM synchronization remains disabled. No migration has been run against a developer database automatically.
+
+The `1739000000000-GlobalP2pPrivacy` migration adds the default-enabled account-level privacy flag. Apply it before deploying API/web/Desktop builds that use `/p2p/privacy`.
 
 ## Desktop data plane
 

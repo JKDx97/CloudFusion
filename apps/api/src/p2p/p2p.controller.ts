@@ -4,6 +4,7 @@ import {
   Delete,
   Get,
   Param,
+  Patch,
   ParseUUIDPipe,
   Post,
   Query,
@@ -23,6 +24,7 @@ import { UpdatePeerTransferStateDto } from './dto/update-peer-transfer-state.dto
 import { CompleteDeviceStorageReplicaDto } from './dto/complete-device-storage-replica.dto';
 import { DeviceStorageReplicaService } from './device-storage-replica.service';
 import { P2pService } from './p2p.service';
+import { UpdateP2pPrivacyDto } from './dto/update-p2p-privacy.dto';
 
 @ApiTags('p2p')
 @ApiBearerAuth()
@@ -33,6 +35,18 @@ export class P2pController {
     private readonly p2p: P2pService,
     private readonly deviceStorage: DeviceStorageReplicaService,
   ) {}
+
+  @Get('privacy')
+  @ApiOperation({ summary: 'Read the account-wide P2P privacy control' })
+  getPrivacySettings(@Req() request: AuthenticatedRequest) {
+    return this.p2p.getPrivacySettings(request.user.sub);
+  }
+
+  @Patch('privacy')
+  @ApiOperation({ summary: 'Enable or disable all P2P discovery and transfers for the account' })
+  updatePrivacySettings(@Req() request: AuthenticatedRequest, @Body() dto: UpdateP2pPrivacyDto) {
+    return this.p2p.updatePrivacySettings(request.user.sub, dto.enabled);
+  }
 
   @Post('storage/replicas/next')
   @Throttle({ default: { limit: 30, ttl: 60_000 } })

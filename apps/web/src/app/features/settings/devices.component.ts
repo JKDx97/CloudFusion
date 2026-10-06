@@ -4,6 +4,7 @@ import { Component, OnDestroy, OnInit, inject, signal } from '@angular/core';
 import { RouterLink } from '@angular/router';
 import { firstValueFrom } from 'rxjs';
 import { AuthService } from '../../core/auth/auth.service';
+import { DesktopSyncBackgroundService } from '../../core/sync/desktop-sync-background.service';
 import { environment } from '../../../environments/environment';
 import { ApiResponse } from '../../shared/models/api-response.model';
 
@@ -38,6 +39,10 @@ interface DevicePairingCode {
   expiresAt: string;
 }
 
+interface GlobalP2pPrivacy {
+  enabled: boolean;
+}
+
 type P2pSettingKey = 'p2pEnabled' | 'lanDiscoveryEnabled' | 'internetP2pEnabled' | 'relayAllowed' | 'serveLocalFiles';
 
 interface P2pSetting {
@@ -54,6 +59,7 @@ interface P2pSetting {
 export class DevicesComponent implements OnInit, OnDestroy {
   private readonly http = inject(HttpClient);
   private readonly auth = inject(AuthService);
+  private readonly syncCoordinator = inject(DesktopSyncBackgroundService);
   private readonly apiUrl = environment.apiUrl;
   private pairingExpiryTimer?: number;
 
@@ -64,6 +70,9 @@ export class DevicesComponent implements OnInit, OnDestroy {
   readonly currentDeviceId = this.auth.deviceId;
   readonly pairingCode = signal<DevicePairingCode | null>(null);
   readonly loading = signal(true);
+  readonly globalP2pEnabled = signal(true);
+  readonly globalP2pLoaded = signal(false);
+  readonly savingGlobalP2pPrivacy = signal(false);
   readonly creatingCode = signal(false);
   readonly revokingDevice = signal<string | null>(null);
   readonly savingDeviceSettings = signal<string | null>(null);
@@ -90,10 +99,14 @@ export class DevicesComponent implements OnInit, OnDestroy {
     this.loading.set(true);
     this.error.set('');
     try {
-      const response = await firstValueFrom(
-        this.http.get<ApiResponse<RegisteredDevice[]>>(`${this.apiUrl}/devices`),
-      );
+      const [response, privacy] = await Promise.all([
+        firstValueFrom(this.http.get<ApiResponse<RegisteredDevice[]>>(`${this.apiUrl}/devices`)),
+        firstValueFrom(this.http.get<ApiResponse<GlobalP2pPrivacy>>(`${this.apiUrl}/p2p/privacy`)),
+      ]);
       this.devices.set(response.data);
+      this.globalP2pEnabled.set(privacy.data.enabled);
+      this.globalP2pLoaded.set(true);
+      await this.syncCoordinator.updateGlobalP2pPrivacy(privacy.data.enabled);
       const activeDevices = response.data.filter((device) => !device.revokedAt);
       const storageResults = await Promise.all(activeDevices.map(async (device) => {
         try {
@@ -117,9 +130,40 @@ export class DevicesComponent implements OnInit, OnDestroy {
         item.storageClass ?? 'DEVICE_VOLATILE',
       ])));
     } catch {
+      this.globalP2pLoaded.set(false);
       this.error.set('No se pudieron cargar tus dispositivos. Inténtalo de nuevo.');
     } finally {
       this.loading.set(false);
+    }
+  }
+
+  async updateGlobalP2pPrivacy(event: Event): Promise<void> {
+    const input = event.target as HTMLInputElement;
+    const enabled = input.checked;
+    if (this.savingGlobalP2pPrivacy()) return;
+    if (!enabled && !window.confirm('Desactivar P2P en toda tu cuenta? Se retirarán los anuncios y se cancelarán las transferencias P2P activas. Las descargas normales desde la nube seguirán disponibles.')) {
+      input.checked = this.globalP2pEnabled();
+      return;
+    }
+
+    this.savingGlobalP2pPrivacy.set(true);
+    this.error.set('');
+    this.notice.set('');
+    try {
+      const response = await firstValueFrom(this.http.patch<ApiResponse<GlobalP2pPrivacy>>(
+        `${this.apiUrl}/p2p/privacy`,
+        { enabled },
+      ));
+      this.globalP2pEnabled.set(response.data.enabled);
+      await this.syncCoordinator.updateGlobalP2pPrivacy(response.data.enabled);
+      this.notice.set(enabled
+        ? 'P2P se volvió a habilitar para la cuenta. Cada dispositivo conserva sus preferencias individuales.'
+        : 'P2P está desactivado para toda la cuenta. Las descargas desde la nube siguen funcionando.');
+    } catch {
+      input.checked = this.globalP2pEnabled();
+      this.error.set('No se pudo cambiar la privacidad P2P. No se aplicaron cambios; inténtalo de nuevo.');
+    } finally {
+      this.savingGlobalP2pPrivacy.set(false);
     }
   }
 
